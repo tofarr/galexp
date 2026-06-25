@@ -1,0 +1,17 @@
+{
+  "name": "galactic-expanse",
+  "version": "0.1.0",
+  "description": "Browser-playable Master-of-Orion-style 4X space strategy game",
+  "private": true,
+  "scripts": {
+    "bundle":    "bash specs/bundle.sh",
+    "parse":     "bash specs/bundle.sh && quint parse     specs/galexp.qnt",
+    "typecheck": "bash specs/bundle.sh && quint typecheck specs/galexp.qnt",
+    "run":       "bash specs/bundle.sh && quint run --main turn specs/galexp.qnt",
+    "verify":    "bash specs/bundle.sh && quint verify    specs/galexp.qnt"
+  },
+  "devDependencies": {
+    "@informalsystems/quint": "^0.32.0"
+  }
+}
+

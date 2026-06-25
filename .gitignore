@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.apalache-cache/
+*.tla
+out/
+# Generated Quint bundle — always rebuilt from the five source modules.
+specs/galexp.qnt
