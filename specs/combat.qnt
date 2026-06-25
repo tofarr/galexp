@@ -1,14 +1,14 @@
 // ============================================================================
-// combat.qnt — Galactic Expanse: fleet movement, space & ground combat (MOO1)
+// combat.qnt — Galactic Expanse: fleet movement, space & ground combat
 //
-// In MOO1, movement is range-based (no hyperlanes):
-//   • A fleet can reach any star whose squared distance ≤ its fuelRangeSq.
-//   • fuelRangeSq is determined by the best engine tech the empire owns.
+// Movement: range-based (no hyperlanes).  A fleet reaches any star within
+// its squared fuel range (from engine tech) in one turn.
 //
-// Space combat is round-based at contested stars.  Ground combat follows
-// after successful orbital bombardment reduces defender pop below army strength.
+// Each star has at most one colony.  Bombardment and invasion target
+// the star directly — no PlanetId needed.
 //
-// Owns `fleets` and `combatRound` state variables.
+// Missile bases (built via the Defense spending slider) participate in
+// defence when an enemy fleet arrives at a colonised star.
 // ============================================================================
 
 module combat {
@@ -19,9 +19,10 @@ module combat {
 
   // ── Constants ─────────────────────────────────────────────────────────────
 
-  const MAX_COMBAT_ROUNDS:   int  // space battle ends after this many rounds
-  const MAX_FLEETS:          int  // upper bound for model-checking tractability
-  const BOMBARDMENT_DMG_PER_SHIP: int // pop killed per ship per bombardment round
+  const MAX_COMBAT_ROUNDS:        int
+  const MAX_FLEETS:               int
+  const BOMBARDMENT_DMG_PER_SHIP: int   // pop killed per ship per bombardment round
+  const MISSILE_BASE_HP:          int   // HP each missile base contributes to defence
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -29,9 +30,6 @@ module combat {
   var combatRound: int
 
   // ── Engine tech → squared fuel range ─────────────────────────────────────
-  //
-  // Maps the best engine technology an empire has researched to its squared
-  // parsec range, matching the MOO1 drive progression.
 
   pure def engineRangeSq(e: Empire): int =
     if      (e.techs.contains(InterphasedDrive)) { 64 }
@@ -39,25 +37,23 @@ module combat {
     else if (e.techs.contains(SubSpaceDrive))    { 36 }
     else if (e.techs.contains(IonDrive))         { 25 }
     else if (e.techs.contains(FusionEngines))    { 16 }
-    else                                         { 9  }  // NuclearEngines (default)
+    else                                         { 9  }  // NuclearEngines
 
   // ── Fleet queries ─────────────────────────────────────────────────────────
 
   def empiresFleets(eid: EmpireId): Set[FleetId] =
     fleets.keys().filter(fid => fleets.get(fid).owner == eid)
 
-  // Fleets that have arrived at (not in transit to) a star.
   def fleetsAtStar(sid: StarId): Set[FleetId] =
     fleets.keys().filter(fid =>
       fleets.get(fid).location == sid and
       fleets.get(fid).destination == sid
     )
 
-  // More than one empire has fleets at this star.
   def isContested(sid: StarId): bool =
     fleetsAtStar(sid).map(fid => fleets.get(fid).owner).size() > 1
 
-  // List has no exists; fold over it to check if any ship is living.
+  // List has no exists; fold instead.
   def isAlive(fid: FleetId): bool =
     fleets.get(fid).ships.foldl(false, (acc, s) => acc or s.currentHp > 0)
 
@@ -65,16 +61,12 @@ module combat {
     fleets.get(fid).ships.foldl(0, (acc, s) => acc + s.currentHp)
 
   // ── Movement legality ─────────────────────────────────────────────────────
-  //
-  // A fleet's destination must be within its fuelRangeSq from its current
-  // location.  Idle fleets (destination == location) always satisfy this.
 
   def movementLegal(fid: FleetId): bool =
     val f = fleets.get(fid)
     f.destination == f.location or
     withinRange(stars, f.location, f.destination, f.fuelRangeSq)
 
-  // Issue a movement order.  The engine verifies range before calling this.
   action orderMove(fid: FleetId, dest: StarId): bool =
     val f = fleets.get(fid)
     all {
@@ -84,16 +76,12 @@ module combat {
       combatRound' = combatRound
     }
 
-  // Resolve movement: all in-transit fleets arrive at their destination in
-  // one step (MOO1 travel is instantaneous within range).
+  // All in-transit fleets arrive at their destination in one step.
   action advanceFleets: bool = {
     val updated = fleets.keys().fold(fleets, (acc, fid) => {
       val f = acc.get(fid)
-      if (f.location != f.destination) {
-        acc.put(fid, { ...f, location: f.destination })
-      } else {
-        acc
-      }
+      if (f.location != f.destination) { acc.put(fid, { ...f, location: f.destination }) }
+      else { acc }
     })
     all {
       fleets'      = updated,
@@ -107,22 +95,15 @@ module combat {
     val newHp = ship.currentHp - dmg
     { ...ship, currentHp: if (newHp < 0) { 0 } else { newHp } }
 
-  // List has no filter (filter returns a Set in Quint); use foldl instead.
+  // List has no filter returning a List; use foldl.
   pure def pruneDeadShips(f: Fleet): Fleet =
-    { ...f, ships: f.ships.foldl(List(), (acc, s) => if (s.currentHp > 0) { acc.append(s) } else { acc }) }
+    { ...f, ships: f.ships.foldl(List(), (acc, s) =>
+        if (s.currentHp > 0) { acc.append(s) } else { acc }) }
 
   // ── Space combat round ────────────────────────────────────────────────────
   //
-  // Each round:
-  //   1. One non-deterministic attacker fleet is picked.
-  //   2. One non-deterministic enemy fleet is chosen as target.
-  //   3. Non-deterministic damage (0..maxDmg) is applied to the first
-  //      living ship in the target fleet.
-  //   4. Dead ships are removed; combatRound increments.
-  //
-  // `nondet` stays at action scope — never inside lambdas — to keep the
-  // model checker happy.  Mrrshan beam accuracy bonus is captured by a
-  // wider damage range when the attacker is a Mrrshan empire.
+  // Non-deterministic: the model checker explores all attacker/target/damage
+  // combinations.  `nondet` stays at action scope only.
 
   action combatRoundAt(sid: StarId, maxDmg: int): bool = {
     nondet dmg       = 0.to(maxDmg).oneOf()
@@ -136,7 +117,7 @@ module combat {
     } else {
       nondet targetFid = enemies.oneOf()
       val target       = fleets.get(targetFid)
-      // Damage first living ship (simplified targeting; engine implements full logic).
+      // Damage the first living ship (foldl preserves list order).
       val damagedShips = target.ships.foldl(
         { hit: false, result: List() },
         (acc, s) =>
@@ -154,35 +135,41 @@ module combat {
     }
   }
 
-  // Battle ends when one side has no living ships at the star.
+  // Missile bases contribute to defence HP alongside the fleet.
+  // Each base adds MISSILE_BASE_HP to the effective defensive strength.
+  def defenceStrength(sid: StarId): int =
+    val baseHP = colonies.filter(c => c.star == sid)
+                         .fold(0, (acc, c) => acc + c.missileBases * MISSILE_BASE_HP)
+    val fleetHP = fleetsAtStar(sid).fold(0, (acc, fid) => acc + fleetStrength(fid))
+    baseHP + fleetHP
+
+  // Battle ends when one side has no living ships (missile bases are not
+  // modelled as destroyable units here; they absorb damage silently).
   def battleOver(sid: StarId): bool =
-    val empOwners = fleetsAtStar(sid).map(fid => fleets.get(fid).owner)
-    empOwners.exists(e =>
+    val owners = fleetsAtStar(sid).map(fid => fleets.get(fid).owner)
+    owners.exists(e =>
       fleetsAtStar(sid).filter(fid => fleets.get(fid).owner == e)
                        .forall(fid => not(isAlive(fid)))
     )
 
   // ── Orbital bombardment ───────────────────────────────────────────────────
   //
-  // After winning the space battle, a fleet may bombard the colony on a planet
-  // to soften defences before landing troops.  Each ship kills
-  // BOMBARDMENT_DMG_PER_SHIP million population per round.
-  // NeutronBomb-equipped ships kill pop without destroying factories.
+  // Target is the star the fleet currently occupies.  Kills population;
+  // leaves factories and missile bases intact (unless NeutronBomb is used —
+  // distinction handled by the engine; the spec models population reduction).
 
-  action bombardPlanet(fid: FleetId, planetId: PlanetId): bool = {
+  action bombardStar(fid: FleetId): bool = {
     val f = fleets.get(fid)
-    val colonyOpt = colonies.filter(c =>
-      c.star == f.location and c.planet == planetId and c.owner != f.owner
-    )
-    if (colonyOpt.size() == 0) {
+    val colonySet = colonies.filter(c => c.star == f.location and c.owner != f.owner)
+    if (colonySet.size() == 0) {
       all { colonies' = colonies, fleets' = fleets, combatRound' = combatRound }
     } else {
-      nondet c = colonyOpt.oneOf()
+      nondet c     = colonySet.oneOf()
       val numShips = f.ships.foldl(0, (acc, _) => acc + 1)
       val popDmg   = numShips * BOMBARDMENT_DMG_PER_SHIP
       val newPop   = if (c.population - popDmg < 0) { 0 } else { c.population - popDmg }
       all {
-        colonies'    = colonies.exclude(colonyOpt).union(Set({ ...c, population: newPop })),
+        colonies'    = colonies.exclude(colonySet).union(Set({ ...c, population: newPop })),
         fleets'      = fleets,
         combatRound' = combatRound + 1
       }
@@ -191,36 +178,28 @@ module combat {
 
   // ── Ground combat ─────────────────────────────────────────────────────────
   //
-  // Ground troops land when the fleet carries troops AND the planet population
-  // has been reduced below the defenders' army strength.
-  // Bulrathi attackers get a +50% strength bonus.
-  //
-  // Outcome is non-deterministic (dice rolls); the colony flips ownership
-  // on a successful invasion.
+  // Troops land at the fleet's current star.  Bulrathi get +50% attack.
 
   pure def groundAttackStrength(f: Fleet, e: Empire): int =
     val base = f.troops.strength
     if (e.race == Bulrathi) { base * 3 / 2 } else { base }
 
-  pure def groundDefendStrength(c: Colony, e: Empire): int =
-    c.population   // defenders = remaining pop; Bulrathi bonus applies to attack only
+  pure def groundDefendStrength(c: Colony): int =
+    c.population   // every defending colonist fights
 
-  action landTroops(fid: FleetId, planetId: PlanetId): bool = {
-    val f          = fleets.get(fid)
-    val attackEmp  = empires.get(f.owner)
-    val colonySet  = colonies.filter(c =>
-      c.star == f.location and c.planet == planetId and c.owner != f.owner
-    )
+  action landTroops(fid: FleetId): bool = {
+    val f         = fleets.get(fid)
+    val attackEmp = empires.get(f.owner)
+    val colonySet = colonies.filter(c => c.star == f.location and c.owner != f.owner)
     if (colonySet.size() == 0 or f.troops.strength == 0) {
       all { colonies' = colonies, fleets' = fleets, combatRound' = combatRound }
     } else {
       nondet c = colonySet.oneOf()
-      val atkStr   = groundAttackStrength(f, attackEmp)
-      val defStr   = groundDefendStrength(c, empires.get(c.owner))
+      val atkStr  = groundAttackStrength(f, attackEmp)
+      val defStr  = groundDefendStrength(c)
       nondet atkRoll = 1.to(atkStr).oneOf()
       nondet defRoll = 1.to(defStr).oneOf()
       if (atkRoll > defRoll) {
-        // Invasion succeeds: colony changes ownership.
         val captured = { ...c, owner: f.owner, population: c.population / 2 }
         all {
           colonies'    = colonies.exclude(colonySet).union(Set(captured)),
@@ -228,7 +207,6 @@ module combat {
           combatRound' = combatRound
         }
       } else {
-        // Invasion repelled: attacker loses troops.
         all {
           colonies'    = colonies,
           fleets'      = fleets.put(fid, { ...f, troops: { owner: f.owner, strength: 0 } }),
@@ -239,9 +217,6 @@ module combat {
   }
 
   // ── Post-battle cleanup ───────────────────────────────────────────────────
-  //
-  // Remove fleets with no surviving ships.  We rebuild the map from surviving
-  // keys using mapBy so we don't need a remove operation.
 
   action removeDestroyedFleets: bool =
     all {
@@ -260,7 +235,6 @@ module combat {
   val invMovementLegal: bool =
     fleets.keys().forall(fid => movementLegal(fid))
 
-  // List has no forall; use foldl to check all elements.
   val invShipHpNonNegative: bool =
     fleets.keys().forall(fid =>
       fleets.get(fid).ships.foldl(true, (ok, s) => ok and s.currentHp >= 0)

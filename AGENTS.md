@@ -23,13 +23,16 @@ remember:
 | Races | 10 fixed races with hardcoded bonuses | Custom trait-picking system |
 | Tech system | Named techs in 6 fields; one at a time | Levels 1-15 per 7 categories |
 | Galaxy travel | Coordinate-based; fuel range from engine tech | Hyperlane graph |
-| Worker model | Farmers / Workers / Scientists per colony | Allocation percentages |
-| Production | Factories built over time; pollution | Direct PP output |
-| Morale | None | Yes (0-100 scale) |
+| Sub-planets | **None** — one world per star, attributes on StarSystem | Multiple planets per system |
+| Food | **No food system** | Food production and starvation |
+| Worker model | **All colonists work factories; five spending sliders** | Farmers/Workers/Scientists |
+| Production sliders | Ships / Defense / Industry / Ecology / Research | Industry/Research/Ecology % |
+| Morale | None | Yes (0–100 scale) |
 | Victory | Conquest OR Galactic Council vote | 4 paths incl. tech & score |
 | Sociology | Not a tech field | Yes (7th field) |
 | Spying | Named spy missions (Steal, Sabotage…) | Simpler |
 | Galaxy sizes | 24 / 36 / 54 / 108 stars | Different sizes |
+| Antarans | **Not modelled** (MOO2 construct) | Yes |
 
 ---
 
@@ -132,16 +135,20 @@ For model-checking tractability use: `NUM_STARS=4`, `NUM_EMPIRES=2`,
 - `invCoordsInBounds` — all stars within MAP_WIDTH × MAP_HEIGHT
 - `invNoDuplicateCoords` — no two stars share the same position
 - `invStarsWellSpaced` — no two stars closer than MIN_STAR_DIST_SQ
-- `invPlanetIdsDistinct` — planet ids are unique galaxy-wide
+- `invRichnessInBounds` — richness ∈ [0, MAX_RICHNESS] for every star
+- `invMaxPopBasePositive` — colonisable stars have maxPopBase > 0
 
 ### empire module
-- `invAllocationsValid` — farmers+workers+scientists == population at every colony
+- `invSpendingValid` — ships+defense+industry+ecology+research == 100 at every colony
 - `invPopulationPositive` — every colony has pop > 0
 - `invPollutionNonNegative` — pollution ≥ 0 always
 - `invFactoriesInBounds` — factories ≤ maxFactories everywhere
+- `invMissileBasesNonNegative` — missile base count ≥ 0
 - `invBcNonNegative` — no empire goes into debt
 - `invResearchingNotOwned` — empire never "researches" a tech it already has
 - `invPrerequisitesRespected` — no tech appears without its prerequisite
+- `invColonyOnValidStar` — every colony is on a non-Barren, non-Neutron star
+- `invAtMostOneColonyPerStar` — at most one colony occupies each star
 
 ### combat module
 - `invFleetLocationsValid` — all fleet locations are real stars
@@ -186,16 +193,22 @@ bash specs/bundle.sh && ./node_modules/.bin/quint typecheck specs/galexp.qnt
 
 ## Open design questions
 
-- [ ] **Antaran attacks**: MOO1 endgame features Antaran raiders attacking the
-  most advanced empire.  Not yet modelled.
 - [ ] **Multi-player turn order**: In MOO1 all empires submit orders simultaneously
-  and then resolution runs server-side.  The spec models sequential resolution
-  for simplicity.
-- [ ] **Orbital bases (Starbases)**: Currently not a separate entity; ground
-  combat model doesn't account for planetary defences separately.
+  and resolution runs server-side.  The spec models sequential resolution for simplicity.
 - [ ] **Tech rarity / randomness**: The spec treats all named techs as always
   available for research.  MOO1 randomly selects which options appear at each
-  research opportunity (except for Creative races).
-- [ ] **Ship scrapping**: No action to dismantle a fleet for BC refund.
-- [ ] **Food redistribution**: MOO1 allows transferring food between same-empire
-  colonies in the same star system; not yet modelled.
+  research opportunity (except for Creative/Psilon races).
+- [ ] **Ship build queue**: A colony can only produce one ship design at a time
+  (`buildingShip: int`).  MOO1 allows queuing multiple units; not yet modelled.
+- [ ] **Ship scrapping**: No action to dismantle a fleet for a BC refund.
+- [ ] **Planetary shield levels**: `shieldLevel` is tracked but no action yet
+  upgrades it through the Class-5 through Class-20 shield tiers.
+- [ ] **Terraforming**: `TerraformingMed`/`TerraformingMax` techs are defined but
+  no action yet changes `planetType` on a `StarSystem`.
+- [ ] **SoilEnrichment effect**: Tech is defined but no action yet increments
+  `richness` on the target star system.
+
+**Explicitly out of scope:**
+- Antaran attacks (a MOO2 construct, not present in MOO1)
+- Food / starvation (removed by design)
+- Sub-planet entities (each star has one world; attributes on StarSystem)

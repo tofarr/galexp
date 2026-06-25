@@ -1,15 +1,19 @@
 // ============================================================================
 // empire.qnt — Galactic Expanse: empire, colony & research (MOO1 model)
 //
-// Owns the `empires`, `colonies`, and `spies` state variables.  Specifies:
+// Production model (no food):
+//   • All colonists implicitly work in factories.
+//   • Active factories = min(effective_population, factories_built).
+//   • Effective population = max(0, population − pollution_penalty).
+//   • Gross PP = active_factories × BASE_PP_PER_FACTORY × richness_modifier.
+//   • Gross PP is then divided via five spending sliders:
+//       Ships / Defense (missile bases & shields) / Industry / Ecology / Research.
+//   • Research slider converts PP to RP for the empire's active research target.
+//   • Ecology slider converts PP to pollution cleanup.
+//   • Industry slider builds new factories (up to the Robotic Controls cap).
+//   • Defense slider builds missile bases and upgrades planetary shields.
 //
-//   • Per-turn production (food, PP, RP) using the worker / factory model
-//   • Pollution accumulation and ecology cleanup
-//   • Population growth and starvation
-//   • Race-specific production multipliers (10 fixed races)
-//   • Named-technology research (single active target per empire)
-//   • Colony founding, factory building, project completion
-//   • Spy recruitment and empire elimination
+// Population growth is logistic (no food gate): grows toward maxPop each turn.
 // ============================================================================
 
 module empire {
@@ -19,13 +23,11 @@ module empire {
 
   // ── Configuration constants ───────────────────────────────────────────────
 
-  const NUM_EMPIRES:         int  // 2–10 players + AIs
-  const BASE_FOOD_PER_FARMER: int // food units one farmer produces per turn (base)
-  const BASE_PP_PER_WORKER:   int // PP one worker produces per factory per turn
-  const BASE_RP_PER_SCIENTIST: int
-  const POLLUTION_PER_FACTORY: int // pollution units one active factory emits
-  const ECOLOGY_PP_PER_UNIT:   int // PP needed to remove 1 pollution unit
-  const COLONY_SHIP_POP_COST:  int // millions of colonists consumed at founding
+  const NUM_EMPIRES:          int
+  const BASE_PP_PER_FACTORY:  int   // base PP one factory produces per turn
+  const POLLUTION_PER_FACTORY: int  // pollution units one active factory emits/turn
+  const ECOLOGY_CLEANUP_RATE: int   // pollution units removed per PP spent on ecology
+  const COLONY_SHIP_POP:      int   // millions of colonists deposited when founding
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -33,211 +35,199 @@ module empire {
   var colonies: Set[Colony]
   var spies:    Set[Spy]
 
-  // ── Race bonus table ──────────────────────────────────────────────────────
+  // ── Race attribute table ──────────────────────────────────────────────────
   //
-  // Returns the integer percentage bonus (100 = no bonus) for the given race
-  // and production type.  Mirrors the hardcoded MOO1 race statistics.
+  // All multipliers are expressed as integer percentages (100 = no change).
 
-  pure def farmingPct(r: Race): int =
-    if      (r == Sakkra)   { 100 }  // no food bonus; growth is their trait
-    else if (r == Silicoid) { 0   }  // Silicoids do NOT eat food (lithovore)
-    else                    { 100 }
-
+  // Factory production multiplier.
   pure def industryPct(r: Race): int =
-    if      (r == Klackon) { 125 }   // +25%
-    else if (r == Meklar)  { 100 }   // bonus comes from extra factory cap
+    if      (r == Klackon) { 125 }   // +25% factory output
     else                   { 100 }
 
+  // Research-point conversion multiplier.
   pure def researchPct(r: Race): int =
-    if (r == Psilon) { 150 }         // +50% RP (combined with Creative trait)
-    else             { 100 }
+    if (r == Psilon) { 150 } else { 100 }   // Psilon: +50% RP
 
-  // Growth rate multiplier (×100).  Sakkra grow twice as fast.
+  // Population growth rate multiplier.
   pure def growthPct(r: Race): int =
-    if (r == Sakkra) { 200 } else { 100 }
+    if (r == Sakkra) { 200 } else { 100 }   // Sakkra: ×2 growth
 
-  // Silicoids do not consume food; they eat minerals (abstracted as no food need).
+  // Silicoid can colonise any world type without technology prerequisites.
   pure def isLithovore(r: Race): bool =
     r == Silicoid
 
-  // Meklar may run one additional factory above the normal cap.
-  pure def extraFactoryCap(r: Race): int =
-    if (r == Meklar) { 1 } else { 0 }
-
-  // Creative race: Psilon receive all tech options simultaneously.
+  // Psilon receive all available tech options simultaneously.
   pure def isCreative(r: Race): bool =
     r == Psilon
 
-  // ── Robotic Controls: factory cap ratio ──────────────────────────────────
-  //
-  // The number of factories a colony may build per million population is set
-  // by the highest Robotic Controls technology the empire has researched.
-  // Meklar get +1 on top of whatever the tech provides.
+  // Meklar may run one extra factory above the Robotic Controls cap.
+  pure def extraFactoryCap(r: Race): int =
+    if (r == Meklar) { 1 } else { 0 }
+
+  // ── Robotic Controls: factory-per-pop ratio ───────────────────────────────
 
   pure def roboticControlsRatio(e: Empire): int =
     if      (e.techs.contains(RoboticControls5)) { 5 }
     else if (e.techs.contains(RoboticControls4)) { 4 }
     else if (e.techs.contains(RoboticControls3)) { 3 }
     else if (e.techs.contains(RoboticControls2)) { 2 }
-    else                                         { 1 }  // MOO1 default: 1 per pop
+    else                                         { 1 }
 
-  pure def effectiveFactoryCap(e: Empire, c: Colony): int =
-    c.population * (roboticControlsRatio(e) + extraFactoryCap(e.race))
+  pure def effectiveFactoryCap(e: Empire, pop: int): int =
+    pop * (roboticControlsRatio(e) + extraFactoryCap(e.race))
 
-  // ── Production formulas ───────────────────────────────────────────────────
+  // ── Richness modifier ─────────────────────────────────────────────────────
+  //
+  // richness 0 (Ultra Poor) → 75%   richness 2 (Adequate) → 125%
+  // richness 4 (Ultra Rich) → 175%
+  // Formula: (75 + richness × 25) %
 
-  // Food produced.  Silicoids produce 0 food (they don't need it).
-  // Farmers produce BASE_FOOD_PER_FARMER × planet fertility modifier.
-  pure def foodOutput(e: Empire, c: Colony, p: Planet): int =
-    if (isLithovore(e.race)) { 0 }
-    else {
-      val fertilityMod = 100 + (p.fertility * 20)     // each fertility pt = +20%
-      c.alloc.farmers * BASE_FOOD_PER_FARMER * fertilityMod / 100
-    }
+  pure def richnessPct(richness: int): int =
+    75 + richness * 25
 
-  // Food needed per turn.  Silicoids need 0.
-  pure def foodNeeded(e: Empire, c: Colony): int =
-    if (isLithovore(e.race)) { 0 } else { c.population }
+  // ── Core production formulas ──────────────────────────────────────────────
 
-  // Net food balance (positive = surplus, negative = starvation).
-  pure def foodBalance(e: Empire, c: Colony, p: Planet): int =
-    foodOutput(e, c, p) - foodNeeded(e, c)
+  // Population reduced by pollution: one pollution unit reduces effective
+  // population by one million (those colonists are incapacitated).
+  pure def effectivePop(c: Colony): int =
+    val ep = c.population - c.pollution
+    if (ep < 0) { 0 } else { ep }
 
-  // PP from workers operating factories.  Workers without a factory are idle.
-  // Pollution reduces effective population, which bounds available workers.
-  pure def activeWorkers(c: Colony): int =
-    val effectivePop = c.population - c.pollution
-    val availWorkers = if (effectivePop < c.alloc.workers) { effectivePop }
-                       else { c.alloc.workers }
-    val activeFact   = if (availWorkers < c.factories) { availWorkers }
-                       else { c.factories }
-    activeFact
+  // Active factories are limited by how many colonists can operate them.
+  pure def activeFactories(c: Colony): int =
+    val ep = effectivePop(c)
+    if (ep < c.factories) { ep } else { c.factories }
 
-  pure def ppOutput(e: Empire, c: Colony, p: Planet): int =
-    val basePP      = activeWorkers(c) * BASE_PP_PER_WORKER
-    val richnessBonus = p.richness * 10                  // each richness pt = +10%
-    val raceMod     = industryPct(e.race)
-    basePP * (100 + richnessBonus) / 100 * raceMod / 100
+  // Gross production points per turn before the spending split.
+  pure def grossPP(e: Empire, c: Colony, sys: StarSystem): int =
+    activeFactories(c) * BASE_PP_PER_FACTORY
+      * richnessPct(sys.richness) / 100
+      * industryPct(e.race) / 100
 
-  // RP from scientists.
-  pure def rpOutput(e: Empire, c: Colony): int =
-    c.alloc.scientists * BASE_RP_PER_SCIENTIST * researchPct(e.race) / 100
-
-  // Pollution produced per turn (active factories × rate).
-  // AdvancedEcology tech halves the pollution rate.
+  // Pollution produced this turn by active factories.
+  // AdvancedEcology halves the rate empire-wide.
   pure def pollutionProduced(e: Empire, c: Colony): int =
-    val base = activeWorkers(c) * POLLUTION_PER_FACTORY
+    val base = activeFactories(c) * POLLUTION_PER_FACTORY
     if (e.techs.contains(AdvancedEcology)) { base / 2 } else { base }
 
-  // PP needed to fully clean current pollution (rounded up).
-  pure def cleanupCost(c: Colony): int =
-    c.pollution * ECOLOGY_PP_PER_UNIT
+  // Pollution cleaned this turn from the Ecology spending slice.
+  pure def pollutionCleaned(e: Empire, c: Colony, sys: StarSystem): int =
+    val ecoPP = grossPP(e, c, sys) * c.spending.ecology / 100
+    ecoPP * ECOLOGY_CLEANUP_RATE
+
+  // Net pollution after production and cleanup.
+  pure def nextPollution(e: Empire, c: Colony, sys: StarSystem): int =
+    val raw = c.pollution + pollutionProduced(e, c) - pollutionCleaned(e, c, sys)
+    if (raw < 0) { 0 } else { raw }
+
+  // Research points this colony contributes to the empire.
+  pure def rpFromColony(e: Empire, c: Colony, sys: StarSystem): int =
+    grossPP(e, c, sys) * c.spending.research / 100 * researchPct(e.race) / 100
+
+  // PP available for ship construction this turn.
+  pure def shipsPP(e: Empire, c: Colony, sys: StarSystem): int =
+    grossPP(e, c, sys) * c.spending.ships / 100
+
+  // PP available for missile base and shield construction.
+  pure def defensePP(e: Empire, c: Colony, sys: StarSystem): int =
+    grossPP(e, c, sys) * c.spending.defense / 100
+
+  // PP available for building new factories.
+  pure def industryPP(e: Empire, c: Colony, sys: StarSystem): int =
+    grossPP(e, c, sys) * c.spending.industry / 100
 
   // ── Population growth ─────────────────────────────────────────────────────
   //
-  // MOO1 pop growth model:
-  //   • Each turn, potential growth = population / 2  (logistic ceiling)
-  //   • Actual growth is capped by food surplus and headroom to maxPop.
-  //   • Starvation (food < need) causes population decline equal to the deficit.
-  //   • Sakkra grow at twice the normal rate.
+  // Logistic growth toward maxPop; no food gate.
+  // Natural rate: population / 2 per turn, capped by headroom.
+  // Sakkra grow at twice the rate.
 
-  pure def popGrowth(e: Empire, c: Colony, p: Planet): int =
-    val fb       = foodBalance(e, c, p)
+  pure def popGrowth(e: Empire, c: Colony): int =
     val headroom = c.maxPop - c.population
-    if (fb < 0) {
-      fb            // starvation: pop drops by the food deficit
-    } else if (headroom <= 0) {
-      0             // at cap: no growth
+    if (headroom <= 0) {
+      0
     } else {
-      val natural = c.population / 2               // base MOO1 growth potential
-      val capped  = if (natural < headroom) { natural } else { headroom }
-      val food_capped = if (capped < fb) { capped } else { fb }
-      food_capped * growthPct(e.race) / 100
+      val natural  = c.population / 2
+      val capped   = if (natural < headroom) { natural } else { headroom }
+      capped * growthPct(e.race) / 100
     }
 
-  pure def nextPopulation(e: Empire, c: Colony, p: Planet): int =
-    val raw = c.population + popGrowth(e, c, p)
-    if (raw < 0) { 0 }
-    else if (raw > c.maxPop) { c.maxPop }
-    else { raw }
+  pure def nextPopulation(e: Empire, c: Colony): int =
+    val raw = c.population + popGrowth(e, c)
+    if (raw > c.maxPop) { c.maxPop } else { raw }
 
-  // ── Actions: production phase ─────────────────────────────────────────────
+  // ── Action: production phase ──────────────────────────────────────────────
   //
-  // Applies one production tick to a single colony.
-  // PP is spent according to the colony's project; remainder is converted to BC.
+  // Applies one production tick to a single colony:
+  //   • RP added to empire rpAccum
+  //   • Pollution updated
+  //   • Surplus production allocated (factories / defense / ship queue)
+  //     are handled by separate build actions
 
-  action runColonyProduction(eid: EmpireId, c: Colony, p: Planet): bool = {
-    val e        = empires.get(eid)
-    val pp       = ppOutput(e, c, p)
-    val rp       = rpOutput(e, c)
-    val newPoll  = c.pollution + pollutionProduced(e, c)
-    // Apply ecology cleanup if the project is CleanEcology.
-    val pollAfterClean =
-      if (c.project == CleanEcology) {
-        val removed = pp / ECOLOGY_PP_PER_UNIT
-        if (removed > newPoll) { 0 } else { newPoll - removed }
-      } else { newPoll }
-    // BC income: 1 BC per 2 PP of surplus not used on a project.
-    val surplusBC = if (c.project == Idle) { pp / 2 } else { 0 }
+  action runColonyProduction(eid: EmpireId, c: Colony, sys: StarSystem): bool = {
+    val e       = empires.get(eid)
+    val rp      = rpFromColony(e, c, sys)
+    val newPoll = nextPollution(e, c, sys)
     all {
-      colonies' = colonies.exclude(Set(c)).union(Set({ ...c, pollution: pollAfterClean })),
-      empires'  = empires.put(eid, { ...e,
-        bc:     e.bc + surplusBC,
-        rpAccum: e.rpAccum + rp
-      })
+      colonies' = colonies.exclude(Set(c)).union(Set({ ...c, pollution: newPoll })),
+      empires'  = empires.put(eid, { ...e, rpAccum: e.rpAccum + rp })
     }
   }
 
-  // ── Actions: growth phase ─────────────────────────────────────────────────
+  // ── Action: growth phase ──────────────────────────────────────────────────
 
-  action runColonyGrowth(eid: EmpireId, c: Colony, p: Planet): bool = {
+  action runColonyGrowth(eid: EmpireId, c: Colony): bool = {
     val e      = empires.get(eid)
-    val newPop = nextPopulation(e, c, p)
-    val newMaxFact = effectiveFactoryCap(e, { ...c, population: newPop })
+    val newPop = nextPopulation(e, c)
+    val newMax  = effectiveFactoryCap(e, newPop)
     all {
       colonies' = colonies.exclude(Set(c)).union(Set({ ...c,
         population:   newPop,
-        maxFactories: newMaxFact
+        maxFactories: newMax
       })),
       empires' = empires
     }
   }
 
-  // ── Actions: build factory ────────────────────────────────────────────────
+  // ── Action: build factory ─────────────────────────────────────────────────
 
-  action buildFactory(eid: EmpireId, c: Colony): bool = {
+  action buildFactory(eid: EmpireId, c: Colony, sys: StarSystem): bool = {
     val e = empires.get(eid)
     all {
-      c.project == BuildFactory,
       c.factories < c.maxFactories,
+      c.spending.industry > 0,
       colonies' = colonies.exclude(Set(c)).union(Set({ ...c, factories: c.factories + 1 })),
       empires'  = empires
     }
   }
 
-  // ── Actions: research phase ───────────────────────────────────────────────
+  // ── Action: build missile base ────────────────────────────────────────────
+
+  action buildMissileBase(eid: EmpireId, c: Colony, sys: StarSystem): bool = {
+    val e = empires.get(eid)
+    all {
+      c.spending.defense > 0,
+      colonies' = colonies.exclude(Set(c)).union(Set({ ...c, missileBases: c.missileBases + 1 })),
+      empires'  = empires
+    }
+  }
+
+  // ── Action: research ─────────────────────────────────────────────────────
   //
-  // The research cost for each named technology is looked up from the game
-  // engine's cost table (not modelled here; the spec treats `rpCost` as an
-  // opaque function provided by the engine).  When accumulated RP >= cost the
-  // tech is added to the empire's set and `rpAccum` is reset.
+  // `cost` is the RP required for the empire's current research target.
+  // When complete, the tech is added; the player then picks the next target.
 
   pure def hasPrerequisite(e: Empire, t: TechName): bool =
-    // Encodes the partial MOO1 tech prerequisites.
-    // Construction drives must be researched in order.
     if      (t == FusionEngines)     { e.techs.contains(NuclearEngines) }
     else if (t == IonDrive)          { e.techs.contains(FusionEngines) }
     else if (t == SubSpaceDrive)     { e.techs.contains(IonDrive) }
     else if (t == HyperDrive)        { e.techs.contains(SubSpaceDrive) }
     else if (t == InterphasedDrive)  { e.techs.contains(HyperDrive) }
-    // Robotic Controls must be researched in order.
     else if (t == RoboticControls3)  { e.techs.contains(RoboticControls2) }
     else if (t == RoboticControls4)  { e.techs.contains(RoboticControls3) }
     else if (t == RoboticControls5)  { e.techs.contains(RoboticControls4) }
-    // Battle computers in order.
     else if (t == BattleComputer2)   { e.techs.contains(BattleComputer1) }
     else if (t == BattleComputer3)   { e.techs.contains(BattleComputer2) }
-    // Shields in order.
     else if (t == Class3Shield)      { e.techs.contains(Class1Shield) }
     else if (t == Class5Shield)      { e.techs.contains(Class3Shield) }
     else if (t == Class7Shield)      { e.techs.contains(Class5Shield) }
@@ -246,60 +236,56 @@ module empire {
     else if (t == Class20Shield)     { e.techs.contains(Class15Shield) }
     else if (t == Class25Shield)     { e.techs.contains(Class20Shield) }
     else if (t == Class30Shield)     { e.techs.contains(Class25Shield) }
-    // Stellar Converter requires Anti-Matter Bomb.
     else if (t == StellarConverter)  { e.techs.contains(AntiMatterBomb) }
-    // Terraforming requires prior terraforming.
     else if (t == TerraformingMax)   { e.techs.contains(TerraformingMed) }
-    // All others have no prerequisite tracked in the spec.
     else                             { true }
 
-  // Attempt to complete the current research target.  The cost is supplied by
-  // the caller (engine looks it up from its tech-cost table).
   action tryCompleteResearch(eid: EmpireId, cost: int): bool = {
     val e = empires.get(eid)
     if (e.rpAccum >= cost and not(e.techs.contains(e.researching))) {
       empires' = empires.put(eid, { ...e,
         techs:   e.techs.union(Set(e.researching)),
         rpAccum: 0
-        // `researching` is updated by the player choosing the next target.
       })
     } else {
       empires' = empires
     }
   }
 
-  // ── Colony founding ───────────────────────────────────────────────────────
+  // ── Colonisation ─────────────────────────────────────────────────────────
   //
-  // A fleet bearing a Colony Ship lands colonists on an unoccupied planet.
-  // The colony ship is consumed; `COLONY_SHIP_POP_COST` pop is transferred.
+  // No PlanetId: the star system is the colony site.
+  // The world type on the system determines whether the empire can colonise it.
 
-  pure def isColonisable(t: PlanetType, e: Empire): bool =
-    if (isLithovore(e.race)) { true }  // Silicoid colonise anything
-    else if (t == Inferno)   { e.techs.contains(ControlledEnviron) }
-    else if (t == Toxic)     { e.techs.contains(AtmosphericRenewer) }
-    else if (t == Radiated)  { e.techs.contains(RadiationShield_) }
-    else                     { true }
+  pure def isColonisable(sys: StarSystem, e: Empire): bool =
+    if (sys.planetType == Barren)   { false }
+    else if (isLithovore(e.race))   { true }   // Silicoid can colonise anything
+    else if (sys.planetType == Inferno)  { e.techs.contains(ControlledEnviron) }
+    else if (sys.planetType == Toxic)    { e.techs.contains(AtmosphericRenewer) }
+    else if (sys.planetType == Radiated) { e.techs.contains(RadiationShield_) }
+    else                            { true }
 
-  def isUnoccupied(star: StarId, planetId: PlanetId): bool =
-    not(colonies.exists(c => c.star == star and c.planet == planetId))
+  def isUnoccupied(star: StarId): bool =
+    not(colonies.exists(c => c.star == star))
 
-  action foundColony(eid: EmpireId, star: StarId, p: Planet): bool = {
+  action foundColony(eid: EmpireId, sys: StarSystem): bool = {
     val e = empires.get(eid)
     val newCol: Colony = {
-      star:         star,
-      planet:       p.id,
+      star:         sys.id,
       owner:        eid,
-      population:   COLONY_SHIP_POP_COST,   // colonists disembark from ship
-      maxPop:       p.maxPopBase,
+      population:   COLONY_SHIP_POP,
+      maxPop:       sys.maxPopBase,
       factories:    0,
-      maxFactories: COLONY_SHIP_POP_COST * roboticControlsRatio(e),
+      maxFactories: effectiveFactoryCap(e, COLONY_SHIP_POP),
       pollution:    0,
-      alloc:        { farmers: COLONY_SHIP_POP_COST, workers: 0, scientists: 0 },
-      project:      Idle
+      missileBases: 0,
+      shieldLevel:  0,
+      spending:     { ships: 0, defense: 0, industry: 50, ecology: 20, research: 30 },
+      buildingShip: -1
     }
     all {
-      isColonisable(p.type_, e),
-      isUnoccupied(star, p.id),
+      isColonisable(sys, e),
+      isUnoccupied(sys.id),
       colonies' = colonies.union(Set(newCol)),
       empires'  = empires
     }
@@ -319,7 +305,7 @@ module empire {
     }
   }
 
-  // ── Total galaxy population (for council threshold) ───────────────────────
+  // ── Population helpers for council ───────────────────────────────────────
 
   def totalPop: int =
     colonies.fold(0, (acc, c) => acc + c.population)
@@ -327,18 +313,17 @@ module empire {
   def empirePop(eid: EmpireId): int =
     colonies.filter(c => c.owner == eid).fold(0, (acc, c) => acc + c.population)
 
-  // ── Worker allocation validity ────────────────────────────────────────────
+  // ── Spending allocation validity ──────────────────────────────────────────
 
-  pure def allocOk(c: Colony): bool =
-    c.alloc.farmers >= 0 and
-    c.alloc.workers >= 0 and
-    c.alloc.scientists >= 0 and
-    c.alloc.farmers + c.alloc.workers + c.alloc.scientists == c.population
+  pure def spendingOk(s: SpendingAlloc): bool =
+    s.ships    >= 0 and s.defense   >= 0 and s.industry >= 0 and
+    s.ecology  >= 0 and s.research  >= 0 and
+    s.ships + s.defense + s.industry + s.ecology + s.research == 100
 
   // ── Invariant conditions ──────────────────────────────────────────────────
 
-  val invAllocationsValid: bool =
-    colonies.forall(c => allocOk(c))
+  val invSpendingValid: bool =
+    colonies.forall(c => spendingOk(c.spending))
 
   val invPopulationPositive: bool =
     colonies.forall(c => c.population > 0)
@@ -349,11 +334,16 @@ module empire {
   val invFactoriesInBounds: bool =
     colonies.forall(c => c.factories >= 0 and c.factories <= c.maxFactories)
 
+  val invMissileBasesNonNegative: bool =
+    colonies.forall(c => c.missileBases >= 0)
+
+  val invShieldLevelNonNegative: bool =
+    colonies.forall(c => c.shieldLevel >= 0)
+
   val invBcNonNegative: bool =
     empires.keys().forall(eid => empires.get(eid).bc >= 0)
 
   val invResearchingNotOwned: bool =
-    // An empire should not be "researching" a tech it already has.
     empires.keys().forall(eid =>
       not(empires.get(eid).techs.contains(empires.get(eid).researching))
     )
@@ -368,8 +358,20 @@ module empire {
 
   val invPrerequisitesRespected: bool =
     empires.keys().forall(eid =>
-      empires.get(eid).techs.forall(t =>
-        hasPrerequisite(empires.get(eid), t)
+      empires.get(eid).techs.forall(t => hasPrerequisite(empires.get(eid), t))
+    )
+
+  val invColonyOnValidStar: bool =
+    // Every colony sits on a star that actually has a colonisable world.
+    colonies.forall(c =>
+      stars.keys().contains(c.star) and
+      stars.get(c.star).planetType != Barren
+    )
+
+  val invAtMostOneColonyPerStar: bool =
+    colonies.forall(c1 =>
+      colonies.forall(c2 =>
+        c1.star == c2.star implies c1.owner == c2.owner
       )
     )
 }

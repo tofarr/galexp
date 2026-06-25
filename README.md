@@ -24,8 +24,10 @@ A procedurally-generated star map of **24–108 systems** (Small/Medium/Large/Hu
 with stars placed freely in 2-D space.  **There are no hyperlanes**; a fleet can
 fly to any star within its fuel range in one turn.  Fuel range is determined by
 engine technology (Nuclear → Fusion → Ion → Sub-Space → Hyper → Interphased Drive).
-Each system holds 1–5 planets; star colour (Blue → Red, Neutron, Black Hole)
-sets planet quality.
+
+Each star has **exactly one colonisable world** (or none for Neutron / Black Hole
+systems).  The world's type, size, and mineral richness are attributes of the
+star system itself — there is no separate planet sub-entity.
 
 ### Races (10 fixed)
 | Race | Key trait |
@@ -44,15 +46,23 @@ sets planet quality.
 Races are fixed — there is no custom trait-picking system.
 
 ### Colonies & production
-Every colonist is assigned to one of three roles each turn:
-- **Farmers** → food production; prevents starvation.
-- **Workers** → operate factories → produce **Production Points (PP)**.
-- **Scientists** → produce **Research Points (RP)**.
+There is no food system.  All colonists work in factories.  Each turn a colony
+generates **gross PP** from its active factories (limited by population and
+pollution), adjusted for the world's mineral richness.  This PP is then divided
+via five spending sliders:
 
-Factories accumulate over time; the cap is set by Robotic Controls tech
-(1–5 factories per million pop).  Active factories emit **pollution**, which
-reduces effective population.  **Ecology** spending converts PP into pollution
-cleanup.
+| Slider | Effect |
+|---|---|
+| **Ships** | Advances construction of the active ship design |
+| **Defense** | Builds missile bases and upgrades the planetary shield |
+| **Industry** | Builds new factories (up to the Robotic Controls cap) |
+| **Ecology** | Removes accumulated factory pollution |
+| **Research** | Contributes to empire-wide research (converted to RP) |
+
+Sliders must sum to 100 %.  Factories emit **pollution** each turn; pollution
+reduces the effective population available to run factories, creating a feedback
+penalty if Ecology spending is neglected.  Klackon get +25 % factory output;
+Meklar can run one extra factory above the normal Robotic Controls cap.
 
 ### Technology (6 named fields)
 Six research fields — **Physics, Biology, Computers, Construction,
