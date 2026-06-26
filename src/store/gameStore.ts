@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GameState, StarId, FleetId, SpendingAlloc, DesignId, Colony } from '../types'
+import type { GameState, StarId, FleetId, SpendingAlloc, DesignId, EmpireId } from '../types'
 import { createNewGame, resolveTurn, type NewGameOptions } from '../engine/turn'
 import { orderMove, foundColony, bombardStar, landTroops, scrapeFleet } from '../engine/combat'
 import { runAITurns } from '../engine/ai'
@@ -25,6 +25,8 @@ interface GameStore {
   queueShip:      (star: StarId, did: DesignId) => void
   dequeueShip:    (star: StarId, idx: number) => void
   setResearching: (tech: import('../types').TechName) => void
+  declareWar:     (eid: EmpireId) => void
+  proposePeace:   (eid: EmpireId) => void
 }
 
 export const useGameStore = create<GameStore>((set, get) => ({
@@ -138,6 +140,40 @@ export const useGameStore = create<GameStore>((set, get) => ({
       newEmpires.set(pid, { ...e, researching: tech, rpAccum: 0 })
       return { game: { ...st.game, empires: newEmpires,
         techOptions: new Map([...st.game.techOptions, [pid, []]]) } }
+    })
+  },
+
+  declareWar(eid) {
+    set(st => {
+      if (!st.game) return {}
+      const pid    = st.game.playerId
+      const newRel = new Map(st.game.relations)
+      const setR   = (a: number, b: number, r: string) => {
+        const inner = new Map(newRel.get(a) ?? new Map())
+        inner.set(b, r as any)
+        newRel.set(a, inner)
+      }
+      setR(pid, eid, 'AtWar'); setR(eid, pid, 'AtWar')
+      const race = st.game.empires.get(eid)?.race ?? `Empire ${eid}`
+      return { game: { ...st.game, relations: newRel,
+        log: [...st.game.log, `War declared on ${race}!`] } }
+    })
+  },
+
+  proposePeace(eid) {
+    set(st => {
+      if (!st.game) return {}
+      const pid    = st.game.playerId
+      const newRel = new Map(st.game.relations)
+      const setR   = (a: number, b: number, r: string) => {
+        const inner = new Map(newRel.get(a) ?? new Map())
+        inner.set(b, r as any)
+        newRel.set(a, inner)
+      }
+      setR(pid, eid, 'Neutral'); setR(eid, pid, 'Neutral')
+      const race = st.game.empires.get(eid)?.race ?? `Empire ${eid}`
+      return { game: { ...st.game, relations: newRel,
+        log: [...st.game.log, `Peace established with ${race}.`] } }
     })
   },
 }))

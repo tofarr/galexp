@@ -122,21 +122,18 @@ function ColonyTab({ sid }: { sid: number }) {
   const rp     = rpFromColony(player, colony, sys)
   const poll   = pollutionProduced(player, colony)
 
-  function handleSlider(key: keyof SpendingAlloc, val: number) {
-    const s = { ...colony.spending, [key]: val }
-    const keys: (keyof SpendingAlloc)[] = ['ships','defense','industry','ecology','research']
-    const others = keys.filter(k => k !== key)
-    const total  = Object.values(s).reduce((a: number, v: number) => a + v, 0)
-    const diff   = total - 100
-    // Distribute diff across others proportionally
-    let rem = diff
-    for (const k of others) {
-      if (rem === 0) break
-      const adj = rem > 0 ? -1 : 1
-      if (s[k] - adj >= 0 && s[k] - adj <= 100) { s[k] -= adj; rem -= adj > 0 ? -1 : 1 }
+  function handleSlider(key: keyof SpendingAlloc, raw: number) {
+    const ALL: (keyof SpendingAlloc)[] = ['ships','defense','industry','ecology','research']
+    const s: SpendingAlloc = { ...colony.spending }
+    let rem = raw - s[key]
+    s[key]  = raw
+    for (const k of ALL) {
+      if (rem === 0 || k === key) continue
+      if (rem > 0) { const take = Math.min(rem, s[k]);         s[k] -= take; rem -= take }
+      else         { const give = Math.min(-rem, 100 - s[k]);  s[k] += give; rem += give }
     }
-    const finalTotal = (Object.values(s) as number[]).reduce((a,v)=>a+v,0)
-    if (finalTotal === 100) setSpending(sid, s)
+    if (rem !== 0) s[key] = raw - rem
+    setSpending(sid, s)
   }
 
   const playerDesigns = [...game.designs.values()].filter(d => d.owner === game.playerId)
@@ -208,31 +205,48 @@ function ColonyTab({ sid }: { sid: number }) {
 
 // ── Fleet list at star ────────────────────────────────────────────────────
 function FleetTab({ sid }: { sid: number }) {
-  const { game, selectFleet, moveFleet, bombard } = useGameStore()
+  const { game, selectFleet, bombard, invade } = useGameStore()
   if (!game) return null
 
   const myFleets = [...game.fleets.values()]
     .filter(f => f.location === sid && f.destination === sid && f.owner === game.playerId)
 
+  const enemyColony = game.colonies.find(c => c.star === sid && c.owner !== game.playerId)
+  const canBombardOrInvade = !!enemyColony
+
   return (
     <div className="panel-section">
       <div className="panel-title">Fleets at {game.stars.get(sid)!.name}</div>
+      {myFleets.length === 0 && (
+        <p style={{ fontSize: 10, color: 'var(--text-muted)' }}>No fleets here.</p>
+      )}
       {myFleets.map(f => {
-        const totalHp  = f.ships.reduce((a, s) => a + s.currentHp, 0)
-        const maxHp    = f.ships.reduce((a, s) => a + s.maxHp, 0)
-        const hulls    = f.ships.map(s => game.designs.get(s.design)!.hull).join(', ')
+        const totalHp    = f.ships.reduce((a, s) => a + s.currentHp, 0)
+        const maxHp      = f.ships.reduce((a, s) => a + s.maxHp, 0)
+        const hullCounts = f.ships.reduce((acc, s) => {
+          const h = game.designs.get(s.design)!.hull
+          acc[h] = (acc[h] ?? 0) + 1
+          return acc
+        }, {} as Record<string, number>)
+        const hulls      = Object.entries(hullCounts).map(([h, n]) => n > 1 ? `${n}×${h}` : h).join(', ')
         const isSelected = game.selectedFleet === f.id
         return (
           <div key={f.id}
-            className={`fleet-item${isSelected?' sel':''}`}
-            onClick={()=>selectFleet(isSelected ? null : f.id)}>
-            <div style={{fontWeight:'bold',fontSize:10}}>{hulls}</div>
-            <div style={{fontSize:9,color:'var(--text-muted)'}}>HP: {totalHp}/{maxHp}</div>
-            {isSelected && (
-              <div style={{marginTop:4,display:'flex',gap:4}}>
-                <button className="btn danger" style={{fontSize:9,padding:'2px 6px'}}
-                  onClick={e=>{e.stopPropagation();bombard(f.id)}}>
+            className={`fleet-item${isSelected ? ' sel' : ''}`}
+            onClick={() => selectFleet(isSelected ? null : f.id)}>
+            <div style={{ fontWeight: 'bold', fontSize: 10 }}>{hulls}</div>
+            <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>
+              HP {totalHp}/{maxHp}  ·  {f.ships.length} ship{f.ships.length !== 1 ? 's' : ''}
+            </div>
+            {isSelected && canBombardOrInvade && (
+              <div style={{ marginTop: 6, display: 'flex', gap: 4 }}>
+                <button className="btn danger" style={{ flex: 1, fontSize: 9, padding: '3px 6px' }}
+                  onClick={e => { e.stopPropagation(); bombard(f.id) }}>
                   BOMBARD
+                </button>
+                <button className="btn warn" style={{ flex: 1, fontSize: 9, padding: '3px 6px' }}
+                  onClick={e => { e.stopPropagation(); invade(f.id) }}>
+                  INVADE
                 </button>
               </div>
             )}

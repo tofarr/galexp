@@ -34,7 +34,7 @@ body { background: #010810; font-family: 'Courier New', monospace; color: #a8c8e
 .main-area { flex: 1; display: flex; overflow: hidden; position: relative }
 
 .map-container { flex: 1; position: relative; overflow: hidden }
-.map-container canvas { display: block; pointer-events: auto }
+.map-container svg, .map-container canvas { display: block; width: 100%; height: 100% }
 .hud, .side-panel { position: relative; z-index: 10 }
 
 .side-panel {
@@ -129,6 +129,9 @@ body { background: #010810; font-family: 'Courier New', monospace; color: #a8c8e
   text-transform: uppercase; background: none; border: none; color: var(--text-muted);
   cursor: pointer; font-family: inherit; border-bottom: 2px solid transparent }
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent) }
+
+/* ── Diplomacy ─────────────────────────────────────────────────────────── */
+.diplo-row { }  /* extend .panel-section in place */
 
 /* ── Victory overlay ───────────────────────────────────────────────────── */
 .overlay {

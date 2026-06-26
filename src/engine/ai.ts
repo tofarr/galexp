@@ -8,41 +8,71 @@ import { fleetsAtStar, orderMove, isAlive, empireFleets, foundColony, makeShip, 
 // Adjusts spending sliders and queues ships based on game stage.
 
 function runColonyAI(state: GameState, eid: EmpireId): GameState {
-  const e    = state.empires.get(eid)!
+  const e     = state.empires.get(eid)!
   const spend = defaultSpending(state.turn)
 
-  // Check if we need a colony ship (no colony ships in fleet, good production)
-  const hasColShip = [...state.fleets.values()]
-    .filter(f => f.owner === eid)
-    .some(f => f.ships.some(s => state.designs.get(s.design)?.hull === 'ColonyShip'))
+  const myColonies   = state.colonies.filter(c => c.owner === eid)
+  const myFleets     = [...state.fleets.values()].filter(f => f.owner === eid)
 
-  const myColonies = state.colonies.filter(c => c.owner === eid)
+  // One colony ship in transit or queued is enough
+  const colShipInFleet = myFleets.some(f =>
+    f.ships.some(s => state.designs.get(s.design)?.hull === 'ColonyShip'))
+  const colShipQueued  = myColonies.some(c =>
+    c.buildQueue.some(did => state.designs.get(did)?.hull === 'ColonyShip'))
+  const needColShip    = !colShipInFleet && !colShipQueued
+
+  // Want a destroyer if we have 2+ colonies and no combat ships anywhere
+  const hasCombat = myFleets.some(f =>
+    f.ships.some(s => {
+      const h = state.designs.get(s.design)?.hull
+      return h === 'Destroyer' || h === 'Cruiser' || h === 'Battleship'
+    }))
+  const needDestroyer = myColonies.length >= 2 && !hasCombat
+
   const hasFreeStars = [...state.stars.values()].some(sys =>
     hasColonisableWorld(sys) &&
     !state.colonies.some(c => c.star === sys.id) &&
     isColonisable(sys, e)
   )
 
+  // Pick one queuing colony (largest production colony for ships)
+  const bestCol = myColonies.reduce(
+    (best: Colony | null, c) => !best || c.factories > best.factories ? c : best,
+    null,
+  )
+
   const newCols = state.colonies.map(c => {
     if (c.owner !== eid) return c
     let s = { ...spend }
-    // If nothing to build, redirect ships PP to industry
-    if (c.buildQueue.length === 0 && !hasColShip && hasFreeStars) {
-      // Queue a colony ship if we have enough production
-      const colShipDesign = [...state.designs.values()]
-        .find(d => d.owner === eid && d.hull === 'ColonyShip')
-      if (colShipDesign) {
-        return { ...c, spending: { ...s, ships: 20, industry: s.industry - 20 },
-          buildQueue: [colShipDesign.id] }
-      }
-    }
     if (c.buildQueue.length === 0) {
+      const isBest = c.star === bestCol?.star
+      if (isBest && needColShip && hasFreeStars) {
+        const des = [...state.designs.values()].find(d => d.owner === eid && d.hull === 'ColonyShip')
+        if (des) return { ...c, spending: { ...s, ships: 25, industry: Math.max(0, s.industry - 25) },
+          buildQueue: [des.id] }
+      }
+      if (isBest && needDestroyer) {
+        const des = [...state.designs.values()].find(d => d.owner === eid && d.hull === 'Destroyer')
+        if (des) return { ...c, spending: { ...s, ships: 25, industry: Math.max(0, s.industry - 25) },
+          buildQueue: [des.id] }
+      }
+      // Nothing to build: redirect ships into industry
       s = { ...s, ships: 0, industry: s.industry + s.ships }
     }
     return { ...c, spending: s }
   })
 
-  return { ...state, colonies: newCols }
+  // Auto-pick next research if none queued (prefer engine > robotics > weapons)
+  const newEmpires = new Map(state.empires)
+  const avail      = availableTechs(e)
+  if (e.rpAccum === 0 && avail.length > 0 && !e.techs.has(e.researching)) {
+    const priority = ['FusionEngines','IonDrive','SubSpaceDrive','RoboticControls3',
+                      'RoboticControls4','BattleComputer1','BattleComputer2','Class3Shield']
+    const pick = priority.find(t => avail.includes(t as any)) ?? avail[0]
+    newEmpires.set(eid, { ...e, researching: pick as any })
+  }
+
+  return { ...state, colonies: newCols, empires: newEmpires }
 }
 
 // ── Fleet AI ──────────────────────────────────────────────────────────────
