@@ -1,13 +1,14 @@
-import { Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from 'react'
+import { Component, type ErrorInfo, type ReactNode, useState } from 'react'
 import { useGameStore } from '../store/gameStore'
-import { GalaxyMapRenderer } from '../renderer/GalaxyMap'
+import { GalaxyMapSVG } from './GalaxyMapSVG'
 import { TopBar } from './hud/TopBar'
 import { StarPanel } from './panels/StarPanel'
 import { ResearchPanel } from './panels/ResearchPanel'
+import { DiplomacyPanel } from './panels/DiplomacyPanel'
 import type { Race } from '../types'
 import { ALL_RACES } from '../types'
 
-type SideTab = 'star' | 'research'
+type SideTab = 'star' | 'research' | 'diplo'
 
 // ── Error Boundary ────────────────────────────────────────────────────────
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -17,7 +18,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   render() {
     if (this.state.error) {
       return (
-        <div style={{padding:20,background:'#300',color:'#f88',fontFamily:'monospace',whiteSpace:'pre-wrap'}}>
+        <div style={{ padding: 20, background: '#300', color: '#f88', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
           <strong>Game Error:</strong>{'\n'}
           {(this.state.error as Error).message}{'\n\n'}
           {(this.state.error as Error).stack}
@@ -93,49 +94,8 @@ function VictoryOverlay({ onNewGame }: { onNewGame: () => void }) {
 // ── Main App ──────────────────────────────────────────────────────────────
 export function App() {
   const { game, selectStar, selectFleet } = useGameStore()
-  const mapRef      = useRef<HTMLDivElement>(null)
-  const rendererRef = useRef<GalaxyMapRenderer | null>(null)
   const [started, setStarted] = useState(false)
   const [sideTab, setSideTab] = useState<SideTab>('star')
-
-  // Init renderer once game starts
-  useEffect(() => {
-    if (!started || !game || !mapRef.current) return
-    if (rendererRef.current) return  // already initialised
-
-    try {
-      const renderer = new GalaxyMapRenderer(
-        mapRef.current,
-        id => { selectStar(id); setSideTab('star') },
-        id => selectFleet(id),
-      )
-      rendererRef.current = renderer
-      renderer.render(game)
-      // Delay fitToScreen until after first paint to ensure container has size
-      requestAnimationFrame(() => renderer.fitToScreen())
-    } catch (e) {
-      console.error('PixiJS init failed:', e)
-    }
-
-    return () => {
-      rendererRef.current?.destroy()
-      rendererRef.current = null
-    }
-  }, [started])
-
-  // Re-render on state changes
-  useEffect(() => {
-    if (game && rendererRef.current) {
-      rendererRef.current.render(game)
-    }
-  }, [game])
-
-  // Resize handler
-  useEffect(() => {
-    const onResize = () => rendererRef.current?.resize()
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
 
   if (!started) {
     return (
@@ -152,16 +112,25 @@ export function App() {
       <div className="app">
         <TopBar />
         <div className="main-area">
-          <div className="map-container" ref={mapRef} />
+          {/* Galaxy SVG map — renders without WebGL in any browser */}
+          <div className="map-container">
+            <GalaxyMapSVG
+              onStarClick={id => { selectStar(id); setSideTab('star') }}
+              onFleetClick={id => { selectFleet(id); setSideTab('star') }}
+            />
+          </div>
 
-          <div className="side-panel" style={{borderLeft:'1px solid var(--panel-border)'}}>
+          {/* Right panel */}
+          <div className="side-panel">
             <div className="tabs">
-              <button className={`tab-btn${sideTab==='star'?' active':''}`}    onClick={()=>setSideTab('star')}>Map</button>
+              <button className={`tab-btn${sideTab==='star'   ?' active':''}`} onClick={()=>setSideTab('star')}>Map</button>
               <button className={`tab-btn${sideTab==='research'?' active':''}`} onClick={()=>setSideTab('research')}>Science</button>
+              <button className={`tab-btn${sideTab==='diplo'  ?' active':''}`} onClick={()=>setSideTab('diplo')}>Diplo</button>
             </div>
-            <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column'}}>
+            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
               {sideTab === 'star'     && <StarPanel />}
               {sideTab === 'research' && <ResearchPanel />}
+              {sideTab === 'diplo'    && <DiplomacyPanel />}
             </div>
           </div>
 
