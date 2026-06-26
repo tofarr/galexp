@@ -4,14 +4,26 @@
   "description": "Browser-playable Master-of-Orion-style 4X space strategy game",
   "private": true,
   "scripts": {
-    "bundle":    "bash specs/bundle.sh",
-    "parse":     "bash specs/bundle.sh && quint parse     specs/galexp.qnt",
-    "typecheck": "bash specs/bundle.sh && quint typecheck specs/galexp.qnt",
-    "run":       "bash specs/bundle.sh && quint run --main turn specs/galexp.qnt",
-    "verify":    "bash specs/bundle.sh && quint verify    specs/galexp.qnt"
+    "dev":            "vite",
+    "build":          "tsc -b && vite build",
+    "preview":        "vite preview",
+    "quint:bundle":   "bash specs/bundle.sh",
+    "quint:parse":    "bash specs/bundle.sh && quint parse     specs/galexp.qnt",
+    "quint:check":    "bash specs/bundle.sh && quint typecheck specs/galexp.qnt"
+  },
+  "dependencies": {
+    "pixi.js":  "^7.4.2",
+    "react":    "^18.3.1",
+    "react-dom":"^18.3.1",
+    "zustand":  "^4.5.5"
   },
   "devDependencies": {
-    "@informalsystems/quint": "^0.32.0"
+    "@informalsystems/quint": "^0.32.0",
+    "@types/react":           "^18.3.5",
+    "@types/react-dom":       "^18.3.0",
+    "@vitejs/plugin-react":   "^4.3.1",
+    "typescript":             "^5.5.3",
+    "vite":                   "^5.4.1"
   }
 }
 
