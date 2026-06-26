@@ -1,14 +1,11 @@
 // ============================================================================
 // galaxy.qnt — Galactic Expanse: star map (MOO1 model)
 //
-// Each StarSystem has exactly one world; attributes (planetType, size,
-// richness, maxPopBase) sit directly on the StarSystem record — there is
-// no separate Planet sub-type or PlanetId.
-//
-// Movement is coordinate-based (no hyperlanes): any star whose squared
-// Euclidean distance ≤ fuelRangeSq is reachable in one turn.
-//
-// Galaxy sizes: Small=24  Medium=36  Large=54  Huge=108 stars.
+// Phase 1 additions:
+//   • MIN_HOME_DIST_SQ constant — homeworlds must be placed at least this
+//     far apart so empires don't start on top of each other.
+//   • initGalaxy postcondition enforces homeworld spacing given a homestar set.
+//   • hasColonisableWorld helper used by empire.qnt to guard colonisation.
 // ============================================================================
 
 module galaxy {
@@ -18,14 +15,13 @@ module galaxy {
   // ── Configuration constants ───────────────────────────────────────────────
 
   const NUM_STARS:        int   // 24 | 36 | 54 | 108
-  const MAP_WIDTH:        int   // galaxy grid width  (e.g. 100)
-  const MAP_HEIGHT:       int   // galaxy grid height (e.g. 100)
-  const MIN_STAR_DIST_SQ: int   // minimum squared distance between any two stars
-  const MAX_RICHNESS:     int   // maximum richness value (e.g. 4 = Ultra Rich)
+  const MAP_WIDTH:        int   // e.g. 100
+  const MAP_HEIGHT:       int   // e.g. 100
+  const MIN_STAR_DIST_SQ: int   // prevents star crowding (e.g. 25 = 5 parsec min)
+  const MIN_HOME_DIST_SQ: int   // homeworlds must be at least this far apart (e.g. 400)
+  const MAX_RICHNESS:     int   // e.g. 4 (Ultra Rich)
 
   // ── State ─────────────────────────────────────────────────────────────────
-  //
-  // The star map is immutable after galaxy generation.
 
   var stars: StarId -> StarSystem
 
@@ -51,12 +47,10 @@ module galaxy {
 
   // ── World attribute helpers ───────────────────────────────────────────────
 
-  // True when the system has a world that can ever be colonised (not Barren,
-  // Neutron, or BlackHole class star).
   pure def hasColonisableWorld(g: StarId -> StarSystem, sid: StarId): bool =
     g.get(sid).planetType != Barren and
-    g.get(sid).class_ != Neutron   and
-    g.get(sid).class_ != BlackHole
+    g.get(sid).class_     != Neutron   and
+    g.get(sid).class_     != BlackHole
 
   // ── Exploration ───────────────────────────────────────────────────────────
 
@@ -79,9 +73,10 @@ module galaxy {
   pure def noDuplicateCoords(g: StarId -> StarSystem): bool =
     g.keys().forall(a =>
       g.keys().forall(b =>
-        a == b or
-        not(g.get(a).coords.x == g.get(b).coords.x and
-            g.get(a).coords.y == g.get(b).coords.y)
+        a == b or not(
+          g.get(a).coords.x == g.get(b).coords.x and
+          g.get(a).coords.y == g.get(b).coords.y
+        )
       )
     )
 
@@ -102,9 +97,23 @@ module galaxy {
       hasColonisableWorld(g, sid) implies g.get(sid).maxPopBase > 0
     )
 
-  // ── Galaxy generation postcondition ──────────────────────────────────────
+  // Homeworlds must be well-separated so no two empires start adjacent.
+  pure def homewordsWellSeparated(g: StarId -> StarSystem, homes: Set[StarId]): bool =
+    homes.forall(a =>
+      homes.forall(b =>
+        a == b or distSq(g.get(a).coords, g.get(b).coords) >= MIN_HOME_DIST_SQ
+      )
+    )
 
-  action initGalaxy(newStars: StarId -> StarSystem): bool =
+  // Every homeworld must have a colonisable world (can't start on a Barren/Neutron star).
+  pure def homestardsColonisable(g: StarId -> StarSystem, homes: Set[StarId]): bool =
+    homes.forall(sid => hasColonisableWorld(g, sid))
+
+  // ── Galaxy generation postcondition ──────────────────────────────────────
+  //
+  // `homes` is the set of homestar IDs assigned to the empires.
+
+  action initGalaxy(newStars: StarId -> StarSystem, homes: Set[StarId]): bool =
     all {
       newStars.keys().size() == NUM_STARS,
       coordsInBounds(newStars),
@@ -112,6 +121,9 @@ module galaxy {
       noDuplicateCoords(newStars),
       richnessInBounds(newStars),
       maxPopBasePositive(newStars),
+      homes.forall(h => newStars.keys().contains(h)),
+      homewordsWellSeparated(newStars, homes),
+      homestardsColonisable(newStars, homes),
       stars' = newStars
     }
 

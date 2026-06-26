@@ -1,13 +1,20 @@
 // ============================================================================
 // turn.qnt — Galactic Expanse: master turn state machine (MOO1 model)
 //
-// Nine turn phases per turn:
-//   Orders → Production → Movement → Combat → Invasion →
-//   Growth → Spy → Council → VictoryCheck
+// Phase 1 additions vs previous version:
+//   • contacts state variable — tracks which pairs of empires have met (Gap 20)
+//   • updateContacts — establishes contact when fleets share a star (Gap 20)
+//   • deductShipUpkeep — subtracts per-ship maintenance BC each turn (Gap 11)
+//   • collectTradeIncome — trade BC between contacted, non-hostile empires (Gap 10)
+//   • OrdersPhase note — all empires submit orders simultaneously before
+//     ProductionPhase resolution begins (Gap 1)
 //
-// Victory: Conquest (all rivals eliminated) OR Galactic Council election.
-//
-// Diplomacy: simple four-step relation ladder (War/Neutral/Peace/Alliance).
+// Orders phase simultaneity: the spec models OrdersPhase as a window during
+// which any empire can execute any OrdersPhase action.  The browser engine
+// enforces that the phase does not advance until every living empire has
+// confirmed their orders; this is an implementation constraint, not a formal
+// state constraint (adding it to the spec would require modelling per-empire
+// order-submission flags, which adds complexity without changing invariants).
 // ============================================================================
 
 module turn {
@@ -19,22 +26,77 @@ module turn {
 
   // ── Configuration ─────────────────────────────────────────────────────────
 
-  const COUNCIL_POP_THRESHOLD_PCT: int  // % of total pop that opens a session (e.g. 33)
-  const SPY_SUCCESS_BASE_PCT:      int  // base % success for a spy mission
-  const TURN_LIMIT:                int  // hard cap; prevents infinite games
+  const COUNCIL_POP_THRESHOLD_PCT: int   // % of total pop that opens a council session
+  const SPY_SUCCESS_BASE_PCT:      int
+  const TURN_LIMIT:                int
 
   // ── State ─────────────────────────────────────────────────────────────────
 
   var turn:          int
   var phase:         TurnPhase
-
-  // Nested bilateral relation map: relations.get(a).get(b) = A's stance toward B.
-  // Kept symmetric via setRelation helper.
   var relations:     EmpireId -> (EmpireId -> Relation)
-
   var pendingOffers: Set[{ sender: EmpireId, recipient: EmpireId, offer: DiplomaticOffer }]
   var council:       Set[CouncilSession]
   var winner:        Set[VictoryResult]
+
+  // Gap 20: bilateral contact tracking.
+  // contacts.get(a) is the set of empire IDs that empire A has made contact with.
+  // Contacts are established whenever fleets from two empires share the same star.
+  // Contact is required for trade income, diplomacy offers, and council votes.
+  var contacts: EmpireId -> Set[EmpireId]
+
+  // ── Contact helpers ───────────────────────────────────────────────────────
+
+  def areInContact(a: EmpireId, b: EmpireId): bool =
+    contacts.get(a).contains(b)
+
+  // Establish bilateral contact between two empires.
+  pure def addContact(
+    c:   EmpireId -> Set[EmpireId],
+    a:   EmpireId,
+    b:   EmpireId
+  ): EmpireId -> Set[EmpireId] =
+    c.put(a, c.get(a).union(Set(b)))
+     .put(b, c.get(b).union(Set(a)))
+
+  // Scan all stars: wherever two different empires both have fleets, establish contact.
+  // Also establishes contact when a fleet arrives at a star with an enemy colony.
+  action updateContacts: bool = {
+    val newContacts =
+      stars.keys().fold(contacts, (acc, sid) => {
+        val owners = fleetsAtStar(sid).map(fid => fleets.get(fid).owner)
+        // Add contacts for all pairs of owners at this star.
+        val pairsAdded = owners.fold(acc, (acc2, a) =>
+          owners.filter(b => b != a).fold(acc2, (acc3, b) => addContact(acc3, a, b))
+        )
+        // Fleet owner meets the colony owner at this star (if any).
+        colonies.filter(c => c.star == sid).fold(pairsAdded, (acc2, c) =>
+          owners.fold(acc2, (acc3, fleetOwner) =>
+            if (fleetOwner != c.owner) { addContact(acc3, fleetOwner, c.owner) }
+            else { acc3 }
+          )
+        )
+      })
+    // Also propagate contacts to Empire.contacts field.
+    val newEmpires = empires.keys().fold(empires, (acc, eid) =>
+      acc.put(eid, { ...acc.get(eid), contacts: newContacts.get(eid) })
+    )
+    all {
+      contacts'      = newContacts,
+      empires'       = newEmpires,
+      colonies'      = colonies,
+      techOptions'   = techOptions,
+      fleets'        = fleets,
+      combatRound'   = combatRound,
+      stars'         = stars,
+      relations'     = relations,
+      pendingOffers' = pendingOffers,
+      council'       = council,
+      winner'        = winner,
+      turn'          = turn,
+      phase'         = phase
+    }
+  }
 
   // ── Diplomatic helpers ────────────────────────────────────────────────────
 
@@ -47,10 +109,9 @@ module turn {
   def areAllied(a: EmpireId, b: EmpireId): bool =
     relationBetween(a, b) == Alliance
 
-  // Write rel to both (a→b) and (b→a).
   pure def setRelation(
-    r:   EmpireId -> (EmpireId -> Relation),
-    a:   EmpireId, b: EmpireId, rel: Relation
+    r: EmpireId -> (EmpireId -> Relation),
+    a: EmpireId, b: EmpireId, rel: Relation
   ): EmpireId -> (EmpireId -> Relation) =
     r.put(a, r.get(a).put(b, rel))
      .put(b, r.get(b).put(a, rel))
@@ -63,16 +124,21 @@ module turn {
       not(empires.get(sender).eliminated),
       not(empires.get(recipient).eliminated),
       sender != recipient,
+      areInContact(sender, recipient),   // can only offer to empires you have met
       pendingOffers' = pendingOffers.union(
         Set({ sender: sender, recipient: recipient, offer: offer })
       ),
-      turn'     = turn,   phase'    = phase,
-      relations' = relations, council'  = council, winner' = winner
+      turn'          = turn,   phase'         = phase,
+      relations'     = relations, contacts'  = contacts,
+      council'       = council,   winner'    = winner,
+      empires'       = empires,   colonies'  = colonies,
+      techOptions'   = techOptions, fleets'  = fleets,
+      combatRound'   = combatRound, stars'   = stars
     }
   }
 
   action resolveOffer(
-    o: { sender: EmpireId, recipient: EmpireId, offer: DiplomaticOffer },
+    o:        { sender: EmpireId, recipient: EmpireId, offer: DiplomaticOffer },
     accepted: bool
   ): bool = {
     val cur    = relations.get(o.sender).get(o.recipient)
@@ -85,15 +151,84 @@ module turn {
     all {
       pendingOffers' = pendingOffers.exclude(Set(o)),
       relations'     = setRelation(relations, o.sender, o.recipient, newRel),
-      turn'     = turn,   phase'   = phase,
-      council'  = council, winner' = winner
+      turn'          = turn,   phase'       = phase,
+      contacts'      = contacts, council'   = council,  winner'    = winner,
+      empires'       = empires,   colonies' = colonies,
+      techOptions'   = techOptions, fleets' = fleets,
+      combatRound'   = combatRound, stars'  = stars
+    }
+  }
+
+  // ── Ship upkeep (Gap 11) ──────────────────────────────────────────────────
+  //
+  // Each turn every empire pays BC equal to the sum of upkeep costs for all
+  // its ships.  If an empire cannot pay (bc < upkeep total), it pays what it
+  // can and goes to 0 BC; the engine may then auto-scrap ships in order of
+  // highest upkeep first until balanced.  The spec models the deduction only.
+
+  def totalUpkeep(eid: EmpireId, designs: DesignId -> ShipDesign): int =
+    empiresFleets(eid).fold(0, (acc, fid) =>
+      acc + fleets.get(fid).ships.foldl(0, (a2, s) => a2 + designs.get(s.design).upkeep)
+    )
+
+  action deductShipUpkeep(eid: EmpireId, designs: DesignId -> ShipDesign): bool = {
+    val e      = empires.get(eid)
+    val cost   = totalUpkeep(eid, designs)
+    val newBc  = if (e.bc - cost < 0) { 0 } else { e.bc - cost }
+    all {
+      empires'       = empires.put(eid, { ...e, bc: newBc }),
+      colonies'      = colonies,
+      techOptions'   = techOptions,
+      fleets'        = fleets,
+      combatRound'   = combatRound,
+      stars'         = stars,
+      relations'     = relations,
+      pendingOffers' = pendingOffers,
+      contacts'      = contacts,
+      council'       = council,
+      winner'        = winner,
+      turn'          = turn,
+      phase'         = phase
+    }
+  }
+
+  // ── Trade income (Gap 10) ─────────────────────────────────────────────────
+  //
+  // Empires that are in contact and not at war earn mutual trade income each
+  // turn.  We credit the income to the empire once per contacted pair (the
+  // loop in the engine ensures each pair is processed exactly once).
+
+  action collectTradeIncome(eid: EmpireId): bool = {
+    val e       = empires.get(eid)
+    val tradeBC = contacts.get(eid)
+                    .filter(other =>
+                      not(areAtWar(eid, other)) and
+                      not(empires.get(other).eliminated)
+                    )
+                    .fold(0, (acc, other) =>
+                      acc + tradeIncomePair(e, empirePop(other))
+                    )
+    all {
+      empires'       = empires.put(eid, { ...e, bc: e.bc + tradeBC }),
+      colonies'      = colonies,
+      techOptions'   = techOptions,
+      fleets'        = fleets,
+      combatRound'   = combatRound,
+      stars'         = stars,
+      relations'     = relations,
+      pendingOffers' = pendingOffers,
+      contacts'      = contacts,
+      council'       = council,
+      winner'        = winner,
+      turn'          = turn,
+      phase'         = phase
     }
   }
 
   // ── Spy phase ─────────────────────────────────────────────────────────────
 
   pure def spySuccessRange(spy: Spy, e: Empire): int =
-    if (e.race == Darlok) { SPY_SUCCESS_BASE_PCT + 50 } else { SPY_SUCCESS_BASE_PCT }
+    SPY_SUCCESS_BASE_PCT + spyBonus(e.race)
 
   action resolveSpyMission(spyId: SpyId): bool = {
     nondet spy  = spies.filter(s => s.id == spyId).oneOf()
@@ -104,13 +239,14 @@ module turn {
       spies' = spies.exclude(Set(spy)).union(Set(
         { ...spy, level: if (success and spy.level < 10) { spy.level + 1 } else { spy.level } }
       )),
-      // Other state unchanged by spy resolution.
       empires'       = empires,
       colonies'      = colonies,
+      techOptions'   = techOptions,
       fleets'        = fleets,
       combatRound'   = combatRound,
       relations'     = relations,
       pendingOffers' = pendingOffers,
+      contacts'      = contacts,
       council'       = council,
       winner'        = winner,
       turn'          = turn,
@@ -120,11 +256,6 @@ module turn {
   }
 
   // ── Galactic Council ──────────────────────────────────────────────────────
-  //
-  // Triggered when any empire controls ≥ COUNCIL_POP_THRESHOLD_PCT of total pop.
-  // Candidate = empire with highest population.
-  // Votes = each empire's own population; allies of the candidate vote for them.
-  // Win condition: candidate receives ≥ 2/3 of galaxy-wide total population.
 
   def councilThresholdMet: bool =
     val tot = totalPop
@@ -133,7 +264,6 @@ module turn {
       empirePop(eid) * 100 >= tot * COUNCIL_POP_THRESHOLD_PCT
     )
 
-  // Use −1 as "no empire" sentinel (EmpireId = int).
   def councilCandidate: EmpireId =
     empires.keys()
            .filter(eid => not(empires.get(eid).eliminated))
@@ -142,7 +272,9 @@ module turn {
            )
 
   def votesFor(voter: EmpireId, candidate: EmpireId): int =
-    if (voter == candidate or areAllied(voter, candidate)) { empirePop(voter) }
+    // Only empires in contact with the candidate can vote.
+    if (not(areInContact(voter, candidate)) and voter != candidate) { 0 }
+    else if (voter == candidate or areAllied(voter, candidate)) { empirePop(voter) }
     else { 0 }
 
   def totalVotesForCandidate(candidate: EmpireId): int =
@@ -162,8 +294,9 @@ module turn {
       council'       = Set({ candidate: cand, votes: empires.keys().mapBy(_ => 0) }),
       turn'          = turn,   phase'         = phase,
       relations'     = relations, pendingOffers' = pendingOffers,
-      winner'        = winner,    stars'         = stars,
-      empires'       = empires,   colonies'      = colonies,
+      contacts'      = contacts,  winner'        = winner,
+      stars'         = stars,     empires'       = empires,
+      colonies'      = colonies,  techOptions'   = techOptions,
       fleets'        = fleets,    combatRound'   = combatRound
     }
   }
@@ -176,8 +309,9 @@ module turn {
         council' = Set(),
         turn'          = turn,   phase'         = phase,
         relations'     = relations, pendingOffers' = pendingOffers,
-        stars'         = stars,     empires'       = empires,
-        colonies'      = colonies,  fleets'        = fleets,
+        contacts'      = contacts,  stars'         = stars,
+        empires'       = empires,   colonies'      = colonies,
+        techOptions'   = techOptions, fleets'      = fleets,
         combatRound'   = combatRound
       }
     } else {
@@ -185,8 +319,9 @@ module turn {
         council' = Set(),
         winner'        = winner,    turn'          = turn,
         phase'         = phase,     relations'     = relations,
-        pendingOffers' = pendingOffers, stars'     = stars,
-        empires'       = empires,   colonies'      = colonies,
+        pendingOffers' = pendingOffers, contacts'  = contacts,
+        stars'         = stars,     empires'       = empires,
+        colonies'      = colonies,  techOptions'   = techOptions,
         fleets'        = fleets,    combatRound'   = combatRound
       }
     }
@@ -217,10 +352,12 @@ module turn {
       stars'         = stars,
       empires'       = empires,
       colonies'      = colonies,
+      techOptions'   = techOptions,
       fleets'        = fleets,
       combatRound'   = if (np == CombatPhase) { 0 } else { combatRound },
       relations'     = relations,
       pendingOffers' = pendingOffers,
+      contacts'      = contacts,
       council'       = council,
       winner'        = winner
     }
@@ -234,16 +371,16 @@ module turn {
 
   action checkVictory: bool = {
     val cw     = conquestWinner
-    val result =
-      if (cw.size() > 0) {
-        cw.map(eid => { winner: eid, kind: ConquestVictory, turnNumber: turn })
-      } else { Set() }
+    val result = if (cw.size() > 0) {
+      cw.map(eid => { winner: eid, kind: ConquestVictory, turnNumber: turn })
+    } else { Set() }
     all {
       winner'        = result,
       turn'          = turn,   phase'         = phase,
       relations'     = relations, pendingOffers' = pendingOffers,
-      council'       = council,   stars'         = stars,
-      empires'       = empires,   colonies'      = colonies,
+      contacts'      = contacts,  council'       = council,
+      stars'         = stars,     empires'       = empires,
+      colonies'      = colonies,  techOptions'   = techOptions,
       fleets'        = fleets,    combatRound'   = combatRound
     }
   }
@@ -260,13 +397,15 @@ module turn {
       pendingOffers' = Set(),
       council'       = Set(),
       combatRound'   = 0,
-      relations'     = empireIds.mapBy(_ => neutralInner)
+      relations'     = empireIds.mapBy(_ => neutralInner),
+      contacts'      = empireIds.mapBy(_ => Set()),
+      // techOptions seeded empty for all empires.
+      techOptions'   = empireIds.mapBy(_ => Set())
     }
   }
 
   // ── Top-level step ────────────────────────────────────────────────────────
 
-  // advanceFleets only touches `fleets` and `combatRound`; stamp the rest.
   action stepMovement: bool =
     all {
       phase == MovementPhase,
@@ -274,10 +413,12 @@ module turn {
       stars'         = stars,
       empires'       = empires,
       colonies'      = colonies,
+      techOptions'   = techOptions,
       turn'          = turn,
       phase'         = phase,
       relations'     = relations,
       pendingOffers' = pendingOffers,
+      contacts'      = contacts,
       council'       = council,
       winner'        = winner
     }
@@ -292,14 +433,11 @@ module turn {
 
   // ── Invariant conditions ──────────────────────────────────────────────────
 
-  val invTurnPositive: bool =
-    turn >= 1
+  val invTurnPositive: bool = turn >= 1
 
-  val invTurnBounded: bool =
-    turn <= TURN_LIMIT + 1
+  val invTurnBounded: bool = turn <= TURN_LIMIT + 1
 
-  val invAtMostOneWinner: bool =
-    winner.size() <= 1
+  val invAtMostOneWinner: bool = winner.size() <= 1
 
   val invWinnerIsAlive: bool =
     winner.forall(v =>
@@ -314,6 +452,14 @@ module turn {
       )
     )
 
+  val invContactSymmetry: bool =
+    empires.keys().forall(a =>
+      contacts.get(a).forall(b => contacts.get(b).contains(a))
+    )
+
+  val invDiplomacyRequiresContact: bool =
+    pendingOffers.forall(o => areInContact(o.sender, o.recipient))
+
   val invPendingOffersValid: bool =
     pendingOffers.forall(o =>
       empires.keys().contains(o.sender) and
@@ -321,8 +467,7 @@ module turn {
       o.sender != o.recipient
     )
 
-  val invAtMostOneCouncilSession: bool =
-    council.size() <= 1
+  val invAtMostOneCouncilSession: bool = council.size() <= 1
 
   val invCouncilCandidateExists: bool =
     council.forall(s => empires.keys().contains(s.candidate))

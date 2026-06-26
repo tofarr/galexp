@@ -109,18 +109,31 @@ bash specs/bundle.sh                                # regenerate galexp.qnt
 
 ## MOO1 game constants (defaults)
 
-| Constant | Value | Defined in |
+| Constant | Suggested default | Defined in |
 |---|---|---|
 | `NUM_STARS` | 24 / 36 / 54 / 108 | galaxy.qnt |
 | `MAP_WIDTH`, `MAP_HEIGHT` | 100 each | galaxy.qnt |
-| `MIN_STAR_DIST_SQ` | 25 (5 parsec min) | galaxy.qnt |
-| `NUM_EMPIRES` | 2–10 | empire.qnt |
-| `BASE_FOOD_PER_FARMER` | 2 | empire.qnt |
-| `BASE_PP_PER_WORKER` | 1 | empire.qnt |
+| `MIN_STAR_DIST_SQ` | 25 (5-parsec min) | galaxy.qnt |
+| `MIN_HOME_DIST_SQ` | 400 (20-parsec homeworld min) | galaxy.qnt |
+| `MAX_RICHNESS` | 4 (Ultra Rich) | galaxy.qnt |
+| `NUM_EMPIRES` | 2–8 | empire.qnt |
+| `BASE_PP_PER_FACTORY` | 1 | empire.qnt |
 | `POLLUTION_PER_FACTORY` | 1 | empire.qnt |
-| `ECOLOGY_PP_PER_UNIT` | 2 | empire.qnt |
+| `ECOLOGY_CLEANUP_RATE` | 2 | empire.qnt |
+| `COLONY_SHIP_POP` | 2 | empire.qnt |
+| `BASE_ANDROID_PP` | 5 | empire.qnt |
+| `BASE_ANDROID_RP` | 5 | empire.qnt |
+| `TRADE_FACTOR` | 10 | empire.qnt |
+| `MAX_MISSILE_BASES` | 5 | empire.qnt |
+| `MISSILE_BASE_DEF_COST` | 10 | empire.qnt |
+| `SHIELD_UPGRADE_COST` | 20 | empire.qnt |
 | `MAX_COMBAT_ROUNDS` | 40 | combat.qnt |
+| `MAX_FLEETS` | 500 | combat.qnt |
+| `BOMBARDMENT_DMG_PER_SHIP` | 2 | combat.qnt |
+| `MISSILE_BASE_HP` | 10 | combat.qnt |
+| `SCRAP_REFUND_PCT` | 25 | combat.qnt |
 | `COUNCIL_POP_THRESHOLD_PCT` | 33 | turn.qnt |
+| `SPY_SUCCESS_BASE_PCT` | 30 | turn.qnt |
 | `TURN_LIMIT` | 200 | turn.qnt |
 
 For model-checking tractability use: `NUM_STARS=4`, `NUM_EMPIRES=2`,
@@ -193,20 +206,20 @@ bash specs/bundle.sh && ./node_modules/.bin/quint typecheck specs/galexp.qnt
 
 ## Open design questions
 
-- [ ] **Multi-player turn order**: In MOO1 all empires submit orders simultaneously
-  and resolution runs server-side.  The spec models sequential resolution for simplicity.
-- [ ] **Tech rarity / randomness**: The spec treats all named techs as always
-  available for research.  MOO1 randomly selects which options appear at each
-  research opportunity (except for Creative/Psilon races).
-- [ ] **Ship build queue**: A colony can only produce one ship design at a time
-  (`buildingShip: int`).  MOO1 allows queuing multiple units; not yet modelled.
-- [ ] **Ship scrapping**: No action to dismantle a fleet for a BC refund.
-- [ ] **Planetary shield levels**: `shieldLevel` is tracked but no action yet
-  upgrades it through the Class-5 through Class-20 shield tiers.
-- [ ] **Terraforming**: `TerraformingMed`/`TerraformingMax` techs are defined but
-  no action yet changes `planetType` on a `StarSystem`.
-- [ ] **SoilEnrichment effect**: Tech is defined but no action yet increments
-  `richness` on the target star system.
+All Phase 1 spec gaps have been resolved.  The following smaller items remain
+for the engine implementation phase (Phase 3):
+
+- [ ] **Integer square root for trade income**: `tradeIncomePair` uses an integer
+  approximation.  The engine must use an exact `isqrt` implementation.
+- [ ] **Tech randomness selection**: `offerTechOptions` accepts whatever set the
+  engine passes.  The engine must implement the MOO1 rule: pick 2 random techs
+  from the available set per field (Psilon: all available).
+- [ ] **Auto-scrap on bankruptcy**: When BC = 0 and upkeep exceeds income, the
+  engine must auto-scrap ships in order of highest-upkeep first.
+- [ ] **Ship upkeep cap enforcement**: The spec deducts upkeep without scrapping;
+  the engine adds the auto-scrap loop around `deductShipUpkeep`.
+- [ ] **Combat initiative tiebreak**: `combatRoundAt` uses nondet pick when
+  initiatives are equal.  The engine should break ties by hull size (larger first).
 
 **Explicitly out of scope:**
 - Antaran attacks (a MOO2 construct, not present in MOO1)
