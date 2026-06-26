@@ -204,6 +204,41 @@ bash specs/bundle.sh && ./node_modules/.bin/quint typecheck specs/galexp.qnt
 
 ---
 
+## Browser implementation (Phase 2+3)
+
+**Stack:** Vite 5 + React 18 + TypeScript (strict) + PixiJS v7 + Zustand v4
+
+**Entry:** `index.html` → `src/main.tsx` → `src/ui/App.tsx`
+
+**Key modules:**
+| Path | Purpose |
+|---|---|
+| `src/types/index.ts` | TypeScript port of all Quint types |
+| `src/engine/constants.ts` | Game constants, hull stats, tech cost table |
+| `src/engine/galaxy.ts` | Galaxy generation (seeded RNG, homeworld placement) |
+| `src/engine/empire.ts` | Production, research, growth, race attributes |
+| `src/engine/combat.ts` | Fleet movement, space combat, invasions |
+| `src/engine/turn.ts` | Full turn resolver + `createNewGame` |
+| `src/engine/ai.ts` | Colony AI, fleet AI, diplomacy AI |
+| `src/store/gameStore.ts` | Zustand store — single source of truth |
+| `src/renderer/GalaxyMap.ts` | PixiJS galaxy map renderer |
+| `src/ui/App.tsx` | Main app shell + ErrorBoundary |
+| `src/ui/hud/TopBar.tsx` | Turn/BC/Pop/Research HUD |
+| `src/ui/panels/StarPanel.tsx` | Star info, colony sliders, fleet list |
+| `src/ui/panels/ResearchPanel.tsx` | Tech tree and research progress |
+| `src/index.css` | Dark space theme with CSS variables |
+
+**Dev server:** `npm run dev` (Vite, typically localhost:5173)
+
+**Known quirk:** After clicking LAUNCH GAME, Playwright screenshots need ~2s
+delay before the React state update is reflected in the DOM.
+
+**PixiJS in headless browsers:** The headless Chromium used by Playwright may
+lack WebGL. PixiJS falls back to Canvas 2D but the canvas appears dark in
+screenshots. The map renders correctly in a real browser (Chrome, Firefox).
+
+---
+
 ## Open design questions
 
 All Phase 1 spec gaps have been resolved.  The following smaller items remain
