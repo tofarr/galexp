@@ -33,7 +33,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   newGame(opts) {
     const seed = opts.seed ?? Math.floor(Math.random() * 0xFFFFFF)
-    const rng  = makeRng(seed + 1)   // offset from galaxy seed
+    const rng  = makeRng(seed + 1)
     const game = createNewGame({ ...opts, seed })
     set({ game, rng })
   },

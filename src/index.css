@@ -33,8 +33,9 @@ body { background: #010810; font-family: 'Courier New', monospace; color: #a8c8e
 
 .main-area { flex: 1; display: flex; overflow: hidden; position: relative }
 
-.map-container { flex: 1; position: relative }
-.map-container canvas { display: block }
+.map-container { flex: 1; position: relative; overflow: hidden }
+.map-container canvas { display: block; pointer-events: auto }
+.hud, .side-panel { position: relative; z-index: 10 }
 
 .side-panel {
   width: var(--panel-w);

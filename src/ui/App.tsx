@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from 'react'
 import { useGameStore } from '../store/gameStore'
 import { GalaxyMapRenderer } from '../renderer/GalaxyMap'
 import { TopBar } from './hud/TopBar'
@@ -8,6 +8,25 @@ import type { Race } from '../types'
 import { ALL_RACES } from '../types'
 
 type SideTab = 'star' | 'research'
+
+// ── Error Boundary ────────────────────────────────────────────────────────
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  componentDidCatch(error: Error, info: ErrorInfo) { console.error('Render error:', error, info) }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{padding:20,background:'#300',color:'#f88',fontFamily:'monospace',whiteSpace:'pre-wrap'}}>
+          <strong>Game Error:</strong>{'\n'}
+          {(this.state.error as Error).message}{'\n\n'}
+          {(this.state.error as Error).stack}
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 // ── New Game Screen ───────────────────────────────────────────────────────
 function NewGameScreen({ onStart }: { onStart: () => void }) {
@@ -84,17 +103,22 @@ export function App() {
     if (!started || !game || !mapRef.current) return
     if (rendererRef.current) return  // already initialised
 
-    const renderer = new GalaxyMapRenderer(
-      mapRef.current,
-      id => { selectStar(id); setSideTab('star') },
-      id => selectFleet(id),
-    )
-    rendererRef.current = renderer
-    renderer.render(game)
-    renderer.fitToScreen()
+    try {
+      const renderer = new GalaxyMapRenderer(
+        mapRef.current,
+        id => { selectStar(id); setSideTab('star') },
+        id => selectFleet(id),
+      )
+      rendererRef.current = renderer
+      renderer.render(game)
+      // Delay fitToScreen until after first paint to ensure container has size
+      requestAnimationFrame(() => renderer.fitToScreen())
+    } catch (e) {
+      console.error('PixiJS init failed:', e)
+    }
 
     return () => {
-      renderer.destroy()
+      rendererRef.current?.destroy()
       rendererRef.current = null
     }
   }, [started])
@@ -124,25 +148,26 @@ export function App() {
   if (!game) return null
 
   return (
-    <div className="app">
-      <TopBar />
-      <div className="main-area">
-        <div className="map-container" ref={mapRef} />
+    <ErrorBoundary>
+      <div className="app">
+        <TopBar />
+        <div className="main-area">
+          <div className="map-container" ref={mapRef} />
 
-        {/* Right panel tabs */}
-        <div className="side-panel" style={{borderLeft:'1px solid var(--panel-border)'}}>
-          <div className="tabs">
-            <button className={`tab-btn${sideTab==='star'?' active':''}`}   onClick={()=>setSideTab('star')}>Map</button>
-            <button className={`tab-btn${sideTab==='research'?' active':''}`} onClick={()=>setSideTab('research')}>Science</button>
+          <div className="side-panel" style={{borderLeft:'1px solid var(--panel-border)'}}>
+            <div className="tabs">
+              <button className={`tab-btn${sideTab==='star'?' active':''}`}    onClick={()=>setSideTab('star')}>Map</button>
+              <button className={`tab-btn${sideTab==='research'?' active':''}`} onClick={()=>setSideTab('research')}>Science</button>
+            </div>
+            <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column'}}>
+              {sideTab === 'star'     && <StarPanel />}
+              {sideTab === 'research' && <ResearchPanel />}
+            </div>
           </div>
-          <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
-            {sideTab === 'star'     && <StarPanel />}
-            {sideTab === 'research' && <ResearchPanel />}
-          </div>
+
+          <VictoryOverlay onNewGame={() => setStarted(false)} />
         </div>
-
-        <VictoryOverlay onNewGame={() => setStarted(false)} />
       </div>
-    </div>
+    </ErrorBoundary>
   )
 }
