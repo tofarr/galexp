@@ -204,9 +204,10 @@ bash specs/bundle.sh && ./node_modules/.bin/quint typecheck specs/galexp.qnt
 
 ---
 
-## Browser implementation (Phase 2+3)
+## Browser implementation (Phase 2–8)
 
-**Stack:** Vite 5 + React 18 + TypeScript (strict) + PixiJS v7 + Zustand v4
+**Stack:** Vite 5 + React 18 + TypeScript (strict) + Zustand v4
+(PixiJS removed in Phase 4; galaxy map is now pure React + SVG)
 
 **Entry:** `index.html` → `src/main.tsx` → `src/ui/App.tsx`
 
@@ -220,22 +221,30 @@ bash specs/bundle.sh && ./node_modules/.bin/quint typecheck specs/galexp.qnt
 | `src/engine/combat.ts` | Fleet movement, space combat, invasions |
 | `src/engine/turn.ts` | Full turn resolver + `createNewGame` |
 | `src/engine/ai.ts` | Colony AI, fleet AI, diplomacy AI |
-| `src/store/gameStore.ts` | Zustand store — single source of truth |
-| `src/renderer/GalaxyMap.ts` | PixiJS galaxy map renderer |
-| `src/ui/App.tsx` | Main app shell + ErrorBoundary |
-| `src/ui/hud/TopBar.tsx` | Turn/BC/Pop/Research HUD |
-| `src/ui/panels/StarPanel.tsx` | Star info, colony sliders, fleet list |
+| `src/store/gameStore.ts` | Zustand store + all player/AI actions |
+| `src/renderer/GalaxyMap.ts` | Legacy PixiJS renderer (no longer used; kept for reference) |
+| `src/ui/GalaxyMapSVG.tsx` | **Active** SVG galaxy renderer — zoom/pan, fog-of-war, range rings |
+| `src/ui/App.tsx` | Main app shell: NewGame → SVG map + side panel |
+| `src/ui/hud/TopBar.tsx` | Turn/BC/Pop/Race/Research HUD |
+| `src/ui/panels/StarPanel.tsx` | Star info, colony sliders (fixed), fleet list + INVADE |
 | `src/ui/panels/ResearchPanel.tsx` | Tech tree and research progress |
+| `src/ui/panels/DiplomacyPanel.tsx` | Known empires, trade, DECLARE WAR / PROPOSE PEACE |
 | `src/index.css` | Dark space theme with CSS variables |
 
-**Dev server:** `npm run dev` (Vite, typically localhost:5173)
+**Dev server:** `npm run dev` (Vite, typically localhost:5174 in this env)
 
-**Known quirk:** After clicking LAUNCH GAME, Playwright screenshots need ~2s
-delay before the React state update is reflected in the DOM.
+**Headless rendering:** The SVG galaxy map works without WebGL; all elements
+are visible in Playwright headless Chromium. After clicking LAUNCH GAME allow
+~2 s for the React state to be reflected in the DOM.
 
-**PixiJS in headless browsers:** The headless Chromium used by Playwright may
-lack WebGL. PixiJS falls back to Canvas 2D but the canvas appears dark in
-screenshots. The map renders correctly in a real browser (Chrome, Firefox).
+**Side panel tabs:** Map | Science | Diplo
+- Map → `StarPanel` (sub-tabs: Star / Colony / Fleets based on selection)
+- Science → `ResearchPanel`
+- Diplo → `DiplomacyPanel`
+
+**Store actions (complete):** `newGame`, `endTurn`, `selectStar`, `selectFleet`,
+`moveFleet`, `colonise`, `bombard`, `invade`, `scrapeFleet`, `setSpending`,
+`queueShip`, `dequeueShip`, `setResearching`, `declareWar`, `proposePeace`
 
 ---
 
